@@ -10,7 +10,7 @@ import Footer from './components/Footer';
 import TurnstileWidget from './components/TurnstileWidget';
 import FormatSelector from './components/FormatSelector';
 import { getMedia } from './services/db';
-import { X, Volume2, Film, PictureInPicture, Play, Pause, Volume1, VolumeX, Music } from 'lucide-react';
+import { X, Volume2, Film, PictureInPicture, Play, Pause, Volume1, VolumeX, Music, SkipBack, SkipForward, Maximize, Minimize } from 'lucide-react';
 
 export default function App() {
   const {
@@ -74,6 +74,17 @@ export default function App() {
   });
   const lastProgressSaveRef = useRef({});
   const videoHasSeekedRef = useRef(false);
+
+  // Custom Video Player States
+  const videoContainerRef = useRef(null);
+  const controlsTimeoutRef = useRef(null);
+  const [videoIsPlaying, setVideoIsPlaying] = useState(false);
+  const [videoCurrentTime, setVideoCurrentTime] = useState(0);
+  const [videoDuration, setVideoDuration] = useState(0);
+  const [videoVolume, setVideoVolume] = useState(0.8);
+  const [videoIsMuted, setVideoIsMuted] = useState(false);
+  const [showVideoControls, setShowVideoControls] = useState(true);
+  const [isFullscreen, setIsFullscreen] = useState(false);
 
   // Reset seek guard on active item changes
   useEffect(() => {
@@ -201,11 +212,14 @@ export default function App() {
 
   const handleVideoTimeUpdate = () => {
     if (!videoRef.current || !activePlayItem) return;
-    savePlaybackProgress(activePlayItem, videoRef.current.currentTime, videoRef.current.duration);
+    const currentTime = videoRef.current.currentTime;
+    setVideoCurrentTime(currentTime);
+    savePlaybackProgress(activePlayItem, currentTime, videoRef.current.duration);
   };
 
   const handleVideoLoadedMetadata = () => {
     if (!videoRef.current) return;
+    setVideoDuration(videoRef.current.duration);
     resumePlaybackPosition(videoRef.current, false);
   };
 
@@ -223,6 +237,132 @@ export default function App() {
       clearPlaybackProgress(activePlayItem);
     }
     closePlayer();
+  };
+
+  const handleVideoPlayPause = () => {
+    if (!videoRef.current) return;
+    if (videoRef.current.paused) {
+      videoRef.current.play().catch(() => {});
+    } else {
+      videoRef.current.pause();
+    }
+  };
+
+  const handleVideoSeek = (e) => {
+    if (!videoRef.current) return;
+    const seekTime = parseFloat(e.target.value);
+    videoRef.current.currentTime = seekTime;
+    setVideoCurrentTime(seekTime);
+  };
+
+  const handleVideoVolumeChange = (e) => {
+    if (!videoRef.current) return;
+    const newVolume = parseFloat(e.target.value);
+    videoRef.current.volume = newVolume;
+    setVideoVolume(newVolume);
+    if (newVolume > 0) {
+      setVideoIsMuted(false);
+      videoRef.current.muted = false;
+    }
+  };
+
+  const handleVideoToggleMute = () => {
+    if (!videoRef.current) return;
+    const newMuted = !videoIsMuted;
+    videoRef.current.muted = newMuted;
+    setVideoIsMuted(newMuted);
+  };
+
+  const toggleFullscreen = async () => {
+    if (!videoContainerRef.current) return;
+    try {
+      if (!document.fullscreenElement) {
+        await videoContainerRef.current.requestFullscreen();
+        setIsFullscreen(true);
+      } else {
+        await document.exitFullscreen();
+        setIsFullscreen(false);
+      }
+    } catch (err) {
+      console.error('Fullscreen request failed:', err);
+    }
+  };
+
+  const resetControlsTimeout = () => {
+    setShowVideoControls(true);
+    if (controlsTimeoutRef.current) {
+      clearTimeout(controlsTimeoutRef.current);
+    }
+    controlsTimeoutRef.current = setTimeout(() => {
+      if (videoRef.current && !videoRef.current.paused) {
+        setShowVideoControls(false);
+      }
+    }, 2500);
+  };
+
+  // Keyboard Shortcuts for Video Player
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      if (activePlayItem && activePlayItem.ext === 'mp4' && !isPiPActive) {
+        if (e.code === 'Space') {
+          e.preventDefault();
+          handleVideoPlayPause();
+        } else if (e.code === 'ArrowLeft') {
+          e.preventDefault();
+          if (videoRef.current) {
+            videoRef.current.currentTime = Math.max(0, videoRef.current.currentTime - 5);
+          }
+        } else if (e.code === 'ArrowRight') {
+          e.preventDefault();
+          if (videoRef.current) {
+            videoRef.current.currentTime = Math.min(videoRef.current.duration || 0, videoRef.current.currentTime + 5);
+          }
+        }
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [activePlayItem, isPiPActive]);
+
+  // Sync Fullscreen State Change (Escape key)
+  useEffect(() => {
+    const handleFullscreenChange = () => {
+      setIsFullscreen(!!document.fullscreenElement);
+    };
+    document.addEventListener('fullscreenchange', handleFullscreenChange);
+    return () => {
+      document.removeEventListener('fullscreenchange', handleFullscreenChange);
+    };
+  }, []);
+
+  // Controls Auto-Hide Cleanup
+  useEffect(() => {
+    return () => {
+      if (controlsTimeoutRef.current) {
+        clearTimeout(controlsTimeoutRef.current);
+      }
+    };
+  }, []);
+
+  // Playlist Navigation
+  const videoPlaylist = history.filter(item => item.ext === 'mp4');
+  const currentVideoIndex = videoPlaylist.findIndex(item => item.id === activePlayItem?.id);
+  const hasPrevVideo = currentVideoIndex > 0;
+  const hasNextVideo = currentVideoIndex < videoPlaylist.length - 1;
+
+  const handlePrevVideo = () => {
+    if (currentVideoIndex > 0) {
+      handlePlay(videoPlaylist[currentVideoIndex - 1]);
+    }
+  };
+
+  const handleNextVideo = () => {
+    if (currentVideoIndex < videoPlaylist.length - 1) {
+      handlePlay(videoPlaylist[currentVideoIndex + 1]);
+    }
   };
 
   const handleAudioSeek = (e) => {
@@ -707,22 +847,32 @@ export default function App() {
             </div>
 
             {/* Video container */}
-            <div className="relative aspect-video bg-black flex items-center justify-center">
+            <div 
+              ref={videoContainerRef}
+              onMouseMove={resetControlsTimeout}
+              onMouseLeave={() => videoIsPlaying && setShowVideoControls(false)}
+              className="relative aspect-video bg-black flex items-center justify-center group select-none overflow-hidden"
+            >
               <video 
                 ref={videoRef}
                 src={activePlayItem.src} 
-                controls 
                 autoPlay 
                 autoPictureInPicture={true}
+                onClick={handleVideoPlayPause}
+                onDoubleClick={toggleFullscreen}
                 onPlay={() => {
+                  setVideoIsPlaying(true);
                   if ('mediaSession' in navigator) {
                     navigator.mediaSession.playbackState = 'playing';
                   }
+                  resetControlsTimeout();
                 }}
                 onPause={() => {
+                  setVideoIsPlaying(false);
                   if ('mediaSession' in navigator) {
                     navigator.mediaSession.playbackState = 'paused';
                   }
+                  setShowVideoControls(true);
                 }}
                 onLoadedMetadata={handleVideoLoadedMetadata}
                 onTimeUpdate={handleVideoTimeUpdate}
@@ -730,8 +880,148 @@ export default function App() {
                 onEnterPictureInPicture={() => setIsPiPActive(true)}
                 onLeavePictureInPicture={handleLeavePiP}
                 onEnded={handleVideoEnded}
-                className="w-full h-full object-contain"
+                className="w-full h-full object-contain cursor-pointer"
               />
+
+              {/* Large center Play/Pause animation button */}
+              <div 
+                onClick={handleVideoPlayPause}
+                className={`absolute inset-0 flex items-center justify-center bg-black/25 transition-opacity duration-300 cursor-pointer ${
+                  showVideoControls ? 'opacity-100' : 'opacity-0 pointer-events-none'
+                }`}
+              >
+                <div className="w-16 h-16 rounded-full bg-white/10 hover:bg-white/20 border border-white/20 flex items-center justify-center text-white backdrop-blur-md shadow-lg transform active:scale-95 transition-all duration-300">
+                  {videoIsPlaying ? (
+                    <Pause className="w-7 h-7 fill-current" />
+                  ) : (
+                    <Play className="w-7 h-7 fill-current ml-1" />
+                  )}
+                </div>
+              </div>
+
+              {/* Bottom control bar overlay */}
+              <div 
+                className={`absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/90 via-black/60 to-transparent p-4 sm:p-6 flex flex-col gap-3 transition-opacity duration-300 z-20 ${
+                  showVideoControls ? 'opacity-100' : 'opacity-0 pointer-events-none'
+                }`}
+              >
+                {/* Progress bar timeline */}
+                <div className="flex items-center gap-3 w-full">
+                  <span className="text-[10px] font-mono text-slate-300 select-none">
+                    {formatTime(videoCurrentTime)}
+                  </span>
+                  
+                  <input 
+                    type="range"
+                    min={0}
+                    max={videoDuration || 100}
+                    value={videoCurrentTime}
+                    onChange={handleVideoSeek}
+                    className="flex-1 h-1.5 bg-white/20 hover:h-2 rounded-lg appearance-none cursor-pointer accent-rose-500 focus:outline-none transition-all duration-150"
+                    style={{
+                      background: `linear-gradient(to right, #f43f5e 0%, #f43f5e ${videoDuration ? (videoCurrentTime / videoDuration) * 100 : 0}%, rgba(255,255,255,0.2) ${videoDuration ? (videoCurrentTime / videoDuration) * 100 : 0}%, rgba(255,255,255,0.2) 100%)`
+                    }}
+                  />
+                  
+                  <span className="text-[10px] font-mono text-slate-300 select-none">
+                    {formatTime(videoDuration)}
+                  </span>
+                </div>
+
+                {/* Control buttons line */}
+                <div className="flex items-center justify-between w-full">
+                  {/* Left Controls: Prev, Play/Pause, Next, Volume */}
+                  <div className="flex items-center gap-3">
+                    {/* Previous Button */}
+                    <button 
+                      onClick={handlePrevVideo}
+                      disabled={!hasPrevVideo}
+                      className="p-1.5 text-slate-300 hover:text-white disabled:opacity-40 disabled:hover:text-slate-300 transition cursor-pointer"
+                      title="Previous video"
+                    >
+                      <SkipBack className="w-5 h-5 fill-current" />
+                    </button>
+
+                    {/* Play/Pause Button */}
+                    <button 
+                      onClick={handleVideoPlayPause}
+                      className="p-1.5 text-white hover:scale-110 active:scale-95 transition cursor-pointer"
+                      title={videoIsPlaying ? "Pause" : "Play"}
+                    >
+                      {videoIsPlaying ? (
+                        <Pause className="w-5 h-5 fill-current" />
+                      ) : (
+                        <Play className="w-5 h-5 fill-current ml-0.5" />
+                      )}
+                    </button>
+
+                    {/* Next Button */}
+                    <button 
+                      onClick={handleNextVideo}
+                      disabled={!hasNextVideo}
+                      className="p-1.5 text-slate-300 hover:text-white disabled:opacity-40 disabled:hover:text-slate-300 transition cursor-pointer"
+                      title="Next video"
+                    >
+                      <SkipForward className="w-5 h-5 fill-current" />
+                    </button>
+
+                    {/* Separator */}
+                    <div className="w-[1px] h-4 bg-white/10 mx-1" />
+
+                    {/* Volume Controls */}
+                    <div className="flex items-center gap-1.5 group/volume">
+                      <button 
+                        onClick={handleVideoToggleMute}
+                        className="text-slate-300 hover:text-white transition cursor-pointer"
+                        title={videoIsMuted ? "Unmute" : "Mute"}
+                      >
+                        {videoIsMuted || videoVolume === 0 ? (
+                          <VolumeX className="w-5 h-5" />
+                        ) : videoVolume < 0.5 ? (
+                          <Volume1 className="w-5 h-5" />
+                        ) : (
+                          <Volume2 className="w-5 h-5" />
+                        )}
+                      </button>
+                      <input 
+                        type="range"
+                        min={0}
+                        max={1}
+                        step={0.05}
+                        value={videoIsMuted ? 0 : videoVolume}
+                        onChange={handleVideoVolumeChange}
+                        className="w-16 h-1 bg-white/20 rounded-lg appearance-none cursor-pointer accent-rose-500 focus:outline-none transition-all duration-150"
+                        style={{
+                          background: `linear-gradient(to right, #f43f5e 0%, #f43f5e ${(videoIsMuted ? 0 : videoVolume) * 100}%, rgba(255,255,255,0.2) ${(videoIsMuted ? 0 : videoVolume) * 100}%, rgba(255,255,255,0.2) 100%)`
+                        }}
+                      />
+                    </div>
+                  </div>
+
+                  {/* Right Controls: PiP, Fullscreen */}
+                  <div className="flex items-center gap-3">
+                    <button 
+                      onClick={togglePiP}
+                      className="p-1.5 text-slate-300 hover:text-white transition cursor-pointer"
+                      title="Picture-in-Picture"
+                    >
+                      <PictureInPicture className="w-5 h-5" />
+                    </button>
+
+                    <button 
+                      onClick={toggleFullscreen}
+                      className="p-1.5 text-slate-300 hover:text-white transition cursor-pointer"
+                      title={isFullscreen ? "Exit Fullscreen" : "Fullscreen"}
+                    >
+                      {isFullscreen ? (
+                        <Minimize className="w-5 h-5" />
+                      ) : (
+                        <Maximize className="w-5 h-5" />
+                      )}
+                    </button>
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
         </div>
