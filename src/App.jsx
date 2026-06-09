@@ -10,7 +10,7 @@ import Footer from './components/Footer';
 import TurnstileWidget from './components/TurnstileWidget';
 import FormatSelector from './components/FormatSelector';
 import { getMedia } from './services/db';
-import { X, Volume2, Film, PictureInPicture } from 'lucide-react';
+import { X, Volume2, Film, PictureInPicture, Play, Pause, Volume1, VolumeX, Music } from 'lucide-react';
 
 export default function App() {
   const {
@@ -48,10 +48,79 @@ export default function App() {
   const [activeTab, setActiveTab] = useState('converter'); // 'converter' or 'library'
   const [isPiPActive, setIsPiPActive] = useState(false);
 
+  // Custom Audio Player States
+  const audioElRef = useRef(null);
+  const [audioIsPlaying, setAudioIsPlaying] = useState(false);
+  const [audioCurrentTime, setAudioCurrentTime] = useState(0);
+  const [audioDuration, setAudioDuration] = useState(0);
+  const [audioVolume, setAudioVolume] = useState(0.8);
+  const [audioIsMuted, setAudioIsMuted] = useState(false);
+
+  const handleAudioPlayPause = () => {
+    if (!audioElRef.current) return;
+    if (audioIsPlaying) {
+      audioElRef.current.pause();
+    } else {
+      audioElRef.current.play().catch(() => {});
+    }
+  };
+
+  const handleAudioTimeUpdate = () => {
+    if (!audioElRef.current) return;
+    setAudioCurrentTime(audioElRef.current.currentTime);
+  };
+
+  const handleAudioLoadedMetadata = () => {
+    if (!audioElRef.current) return;
+    setAudioDuration(audioElRef.current.duration);
+  };
+
+  const handleAudioEnded = () => {
+    setAudioIsPlaying(false);
+    setAudioCurrentTime(0);
+  };
+
+  const handleAudioSeek = (e) => {
+    if (!audioElRef.current) return;
+    const seekTime = parseFloat(e.target.value);
+    audioElRef.current.currentTime = seekTime;
+    setAudioCurrentTime(seekTime);
+  };
+
+  const handleAudioVolumeChange = (e) => {
+    if (!audioElRef.current) return;
+    const newVolume = parseFloat(e.target.value);
+    audioElRef.current.volume = newVolume;
+    setAudioVolume(newVolume);
+    if (newVolume > 0) {
+      setAudioIsMuted(false);
+      audioElRef.current.muted = false;
+    }
+  };
+
+  const handleAudioToggleMute = () => {
+    if (!audioElRef.current) return;
+    const newMuted = !audioIsMuted;
+    audioElRef.current.muted = newMuted;
+    setAudioIsMuted(newMuted);
+  };
+
+  const formatTime = (timeInSeconds) => {
+    if (isNaN(timeInSeconds)) return '0:00';
+    const minutes = Math.floor(timeInSeconds / 60);
+    const seconds = Math.floor(timeInSeconds % 60);
+    return `${minutes}:${seconds < 10 ? '0' : ''}${seconds}`;
+  };
+
   const showStatusPanel = status === 'validating' || status === 'parsed' || status === 'converting' || status === 'ready';
 
   // Resolves local IndexedDB blob URL or fallback streaming link to trigger browser playback
   const handlePlay = async (item) => {
+    // Reset custom audio states first to avoid duration flashes
+    setAudioIsPlaying(false);
+    setAudioCurrentTime(0);
+    setAudioDuration(0);
+
     try {
       if (item.savedInBrowser) {
         const storageId = `${item.id}-${item.quality}-${item.ext}`;
@@ -206,6 +275,14 @@ export default function App() {
       } catch (e) {}
     }
     
+    // Pause custom audio if active
+    if (audioElRef.current) {
+      audioElRef.current.pause();
+    }
+    setAudioIsPlaying(false);
+    setAudioCurrentTime(0);
+    setAudioDuration(0);
+    
     setIsPiPActive(false);
     
     // Revoke object URL if local to prevent memory leaks
@@ -332,22 +409,110 @@ export default function App() {
 
       {/* --- IN-BROWSER AUDIO PLAYER (Bottom Docked) --- */}
       {activePlayItem && activePlayItem.ext === 'mp3' && (
-        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 w-[92%] max-w-xl bg-slate-900/90 border border-white/10 p-4 rounded-2xl backdrop-blur-xl shadow-2xl flex items-center justify-between gap-4 animate-in slide-in-from-bottom-8 duration-300">
-          <div className="flex items-center gap-3 min-w-0 flex-1">
-            <div className="w-9 h-9 rounded-lg bg-rose-500/10 border border-rose-500/20 flex items-center justify-center text-rose-400 flex-shrink-0 animate-pulse">
-              <Volume2 className="w-5 h-5" />
+        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 w-[94%] max-w-2xl bg-slate-900/95 border border-white/10 p-4 rounded-3xl backdrop-blur-xl shadow-2xl flex flex-col sm:flex-row items-center gap-4 animate-in slide-in-from-bottom-8 duration-300">
+          {/* Audio element (hidden controls) */}
+          <audio 
+            ref={audioElRef}
+            src={activePlayItem.src}
+            autoPlay
+            onPlay={() => setAudioIsPlaying(true)}
+            onPause={() => setAudioIsPlaying(false)}
+            onTimeUpdate={handleAudioTimeUpdate}
+            onLoadedMetadata={handleAudioLoadedMetadata}
+            onEnded={handleAudioEnded}
+          />
+
+          {/* Left Block: Thumbnail/Icon & Title */}
+          <div className="flex items-center gap-3 min-w-0 w-full sm:w-auto sm:max-w-[30%] flex-1 sm:flex-none">
+            <div className={`w-10 h-10 rounded-xl bg-gradient-to-tr from-rose-600 to-pink-500 border border-rose-500/20 flex items-center justify-center text-white flex-shrink-0 ${audioIsPlaying ? 'animate-spin' : ''}`} style={{ animationDuration: '10s' }}>
+              <Music className="w-5 h-5" />
             </div>
             <div className="min-w-0 flex-1">
               <p className="text-xs font-bold text-white truncate" title={activePlayItem.title}>
                 {activePlayItem.title}
               </p>
-              <p className="text-[10px] text-slate-500 font-semibold uppercase mt-0.5">
-                Now Streaming (Audio)
+              <p className="text-[10px] text-rose-400 font-semibold uppercase mt-0.5 tracking-wider">
+                {audioIsPlaying ? 'Now Playing' : 'Paused'}
               </p>
             </div>
           </div>
-          <div className="flex items-center gap-3">
-            <audio src={activePlayItem.src} controls autoPlay className="h-9 w-40 sm:w-56 focus:outline-none" />
+
+          {/* Center Block: Controls & Progress */}
+          <div className="flex flex-1 items-center gap-3 w-full min-w-0">
+            {/* Play/Pause Button */}
+            <button 
+              onClick={handleAudioPlayPause}
+              className="w-8 h-8 rounded-full bg-white text-slate-950 flex items-center justify-center hover:scale-105 active:scale-95 transition cursor-pointer flex-shrink-0"
+            >
+              {audioIsPlaying ? (
+                <Pause className="w-4.5 h-4.5 fill-current" />
+              ) : (
+                <Play className="w-4.5 h-4.5 fill-current ml-0.5" />
+              )}
+            </button>
+
+            {/* Time label: current */}
+            <span className="text-[10px] font-mono text-slate-400 flex-shrink-0">
+              {formatTime(audioCurrentTime)}
+            </span>
+
+            {/* Progress Slider (Timeline) */}
+            <input 
+              type="range"
+              min={0}
+              max={audioDuration || 100}
+              value={audioCurrentTime}
+              onChange={handleAudioSeek}
+              className="flex-1 min-w-0 w-full h-1 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-rose-500 focus:outline-none"
+              style={{
+                background: `linear-gradient(to right, #f43f5e 0%, #f43f5e ${audioDuration ? (audioCurrentTime / audioDuration) * 100 : 0}%, #1e293b ${audioDuration ? (audioCurrentTime / audioDuration) * 100 : 0}%, #1e293b 100%)`
+              }}
+            />
+
+            {/* Time label: duration */}
+            <span className="text-[10px] font-mono text-slate-400 flex-shrink-0">
+              {formatTime(audioDuration)}
+            </span>
+          </div>
+
+          {/* Right Block: Volume & Close */}
+          <div className="flex items-center gap-3 flex-shrink-0 justify-end w-full sm:w-auto">
+            {/* Volume controls */}
+            <div className="flex items-center gap-0.5 sm:gap-0 group/volume cursor-pointer">
+              {/* Volume Slider Container: always visible on mobile, expandable on desktop */}
+              <div className="w-16 opacity-100 sm:w-0 sm:opacity-0 sm:group-hover/volume:w-20 sm:group-hover/volume:opacity-100 transition-all duration-300 ease-in-out flex items-center overflow-hidden sm:pr-2">
+                <input 
+                  type="range"
+                  min={0}
+                  max={1}
+                  step={0.05}
+                  value={audioIsMuted ? 0 : audioVolume}
+                  onChange={handleAudioVolumeChange}
+                  className="w-16 sm:w-20 h-1 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-rose-500 focus:outline-none"
+                  style={{
+                    background: `linear-gradient(to right, #f43f5e 0%, #f43f5e ${(audioIsMuted ? 0 : audioVolume) * 100}%, #1e293b ${(audioIsMuted ? 0 : audioVolume) * 100}%, #1e293b 100%)`
+                  }}
+                />
+              </div>
+
+              <button 
+                onClick={handleAudioToggleMute}
+                className="text-slate-400 hover:text-white transition cursor-pointer p-1.5 hover:bg-white/5 rounded-lg flex-shrink-0"
+              >
+                {audioIsMuted || audioVolume === 0 ? (
+                  <VolumeX className="w-4.5 h-4.5" />
+                ) : audioVolume < 0.5 ? (
+                  <Volume1 className="w-4.5 h-4.5" />
+                ) : (
+                  <Volume2 className="w-4.5 h-4.5" />
+                )}
+              </button>
+            </div>
+
+            {/* Separator */}
+            <div className="w-[1px] h-4 bg-slate-800 hidden sm:block" />
+
+            {/* Close button */}
             <button 
               onClick={closePlayer}
               className="p-1.5 hover:bg-white/5 border border-transparent hover:border-white/5 rounded-lg text-slate-400 hover:text-white transition-all duration-200 cursor-pointer"
