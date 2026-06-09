@@ -85,6 +85,7 @@ export default function App() {
   const [videoIsMuted, setVideoIsMuted] = useState(false);
   const [showVideoControls, setShowVideoControls] = useState(true);
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const [isDraggingVideoTimeline, setIsDraggingVideoTimeline] = useState(false);
 
   // Reset seek guard on active item changes
   useEffect(() => {
@@ -211,7 +212,7 @@ export default function App() {
   };
 
   const handleVideoTimeUpdate = () => {
-    if (!videoRef.current || !activePlayItem) return;
+    if (!videoRef.current || !activePlayItem || isDraggingVideoTimeline) return;
     const currentTime = videoRef.current.currentTime;
     setVideoCurrentTime(currentTime);
     savePlaybackProgress(activePlayItem, currentTime, videoRef.current.duration);
@@ -229,14 +230,18 @@ export default function App() {
   };
 
   const handleVideoEnded = () => {
-    if ('mediaSession' in navigator) {
-      // eslint-disable-next-line
-      navigator.mediaSession.playbackState = 'none';
-    }
     if (activePlayItem) {
       clearPlaybackProgress(activePlayItem);
     }
-    closePlayer();
+    if (hasNextVideo) {
+      handleNextVideo();
+    } else {
+      if ('mediaSession' in navigator) {
+        // eslint-disable-next-line
+        navigator.mediaSession.playbackState = 'none';
+      }
+      closePlayer();
+    }
   };
 
   const handleVideoPlayPause = () => {
@@ -248,11 +253,9 @@ export default function App() {
     }
   };
 
-  const handleVideoSeek = (e) => {
+  const seekVideo = (seekTime) => {
     if (!videoRef.current) return;
-    const seekTime = parseFloat(e.target.value);
     videoRef.current.currentTime = seekTime;
-    setVideoCurrentTime(seekTime);
   };
 
   const handleVideoVolumeChange = (e) => {
@@ -916,7 +919,17 @@ export default function App() {
                     min={0}
                     max={videoDuration || 100}
                     value={videoCurrentTime}
-                    onChange={handleVideoSeek}
+                    onInput={(e) => {
+                      setVideoCurrentTime(parseFloat(e.target.value));
+                    }}
+                    onChange={(e) => {
+                      const seekTime = parseFloat(e.target.value);
+                      seekVideo(seekTime);
+                      savePlaybackProgress(activePlayItem, seekTime, videoDuration);
+                      setIsDraggingVideoTimeline(false);
+                    }}
+                    onMouseDown={() => setIsDraggingVideoTimeline(true)}
+                    onTouchStart={() => setIsDraggingVideoTimeline(true)}
                     className="flex-1 h-1.5 bg-white/20 hover:h-2 rounded-lg appearance-none cursor-pointer accent-rose-500 focus:outline-none transition-all duration-150"
                     style={{
                       background: `linear-gradient(to right, #f43f5e 0%, #f43f5e ${videoDuration ? (videoCurrentTime / videoDuration) * 100 : 0}%, rgba(255,255,255,0.2) ${videoDuration ? (videoCurrentTime / videoDuration) * 100 : 0}%, rgba(255,255,255,0.2) 100%)`
