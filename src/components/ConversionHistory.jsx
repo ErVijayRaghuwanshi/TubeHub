@@ -11,7 +11,8 @@ export default function ConversionHistory({
   onGoToConverter,
   savingIds = [],
   onDeleteHistoryItem,
-  onReconvert
+  onReconvert,
+  playbackProgress = {}
 }) {
   const [searchQuery, setSearchQuery] = useState('');
   const [filterType, setFilterType] = useState('all'); // 'all', 'audio', 'video', 'saved'
@@ -124,6 +125,9 @@ export default function ConversionHistory({
             const itemKey = `${item.id}-${quality}-${ext}`;
             const isSaving = savingIds.includes(itemKey);
             const thumbnailUrl = `https://img.youtube.com/vi/${item.id}/mqdefault.jpg`;
+            
+            const progress = playbackProgress?.[itemKey];
+            const progressPercent = progress ? progress.percentage : 0;
 
             return (
               <div 
@@ -172,6 +176,16 @@ export default function ConversionHistory({
                       <Sparkles className="w-2.5 h-2.5" /> Offline
                     </div>
                   )}
+
+                  {/* Playback progress bar (like YouTube) */}
+                  {progressPercent > 0 && (
+                    <div className="absolute bottom-0 left-0 right-0 h-1 bg-white/20 z-10">
+                      <div 
+                        className="bg-rose-500 h-full transition-all duration-300" 
+                        style={{ width: `${progressPercent}%` }} 
+                      />
+                    </div>
+                  )}
                 </div>
 
                 {/* Card Body Info */}
@@ -209,6 +223,14 @@ export default function ConversionHistory({
                           <span className={item.savedInBrowser ? "text-green-400" : "text-slate-500"}>
                             {item.savedInBrowser ? 'Saved Offline' : 'Cloud Link'}
                           </span>
+                          {progressPercent > 0 && (
+                            <>
+                              <span>•</span>
+                              <span className="text-rose-400 font-semibold">
+                                {progressPercent >= 100 ? 'Completed' : `${Math.round(progressPercent)}% played`}
+                              </span>
+                            </>
+                          )}
                         </p>
                       </div>
                     </div>

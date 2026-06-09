@@ -45,7 +45,14 @@ export default function App() {
 
   // Active Playback Overlay State
   const [activePlayItem, setActivePlayItem] = useState(null); // { title, ext, src }
-  const [activeTab, setActiveTab] = useState('converter'); // 'converter' or 'library'
+  const [activeTab, setActiveTab] = useState(() => {
+    try {
+      const stored = localStorage.getItem('tubehub_active_tab');
+      return (stored === 'converter' || stored === 'library') ? stored : 'converter';
+    } catch {
+      return 'converter';
+    }
+  });
   const [isPiPActive, setIsPiPActive] = useState(false);
 
   // Custom Audio Player States
@@ -55,6 +62,110 @@ export default function App() {
   const [audioDuration, setAudioDuration] = useState(0);
   const [audioVolume, setAudioVolume] = useState(0.8);
   const [audioIsMuted, setAudioIsMuted] = useState(false);
+
+  // Playback progress resume states
+  const [playbackProgress, setPlaybackProgress] = useState(() => {
+    try {
+      const stored = localStorage.getItem('tubehub_playback_progress');
+      return stored ? JSON.parse(stored) : {};
+    } catch {
+      return {};
+    }
+  });
+  const lastProgressSaveRef = useRef({});
+  const videoHasSeekedRef = useRef(false);
+
+  // Reset seek guard on active item changes
+  useEffect(() => {
+    videoHasSeekedRef.current = false;
+  }, [activePlayItem]);
+
+  const savePlaybackProgress = (item, currentTime, duration) => {
+    if (!item || !duration || isNaN(duration)) return;
+    
+    const key = `${item.id}-${item.quality || '320'}-${item.ext}`;
+    const now = Date.now();
+    const lastSave = lastProgressSaveRef.current[key] || 0;
+    
+    // Save every 2 seconds, or if currentTime is 0, or at the end
+    if (now - lastSave >= 2000 || currentTime === 0 || Math.abs(currentTime - duration) < 1) {
+      lastProgressSaveRef.current[key] = now;
+      
+      try {
+        const percentage = (currentTime / duration) * 100;
+        const isCompleted = currentTime >= duration - 5 || percentage > 97;
+        
+        const updatedProgress = {
+          currentTime: isCompleted ? 0 : currentTime,
+          duration,
+          percentage: isCompleted ? 100 : percentage,
+          updatedAt: now
+        };
+        
+        setPlaybackProgress(prev => {
+          const newMap = {
+            ...prev,
+            [key]: updatedProgress
+          };
+          localStorage.setItem('tubehub_playback_progress', JSON.stringify(newMap));
+          return newMap;
+        });
+      } catch (e) {
+        console.error('Failed to save playback progress', e);
+      }
+    }
+  };
+
+  const clearPlaybackProgress = (item) => {
+    if (!item) return;
+    const key = `${item.id}-${item.quality || '320'}-${item.ext}`;
+    try {
+      setPlaybackProgress(prev => {
+        const itemProgress = prev[key];
+        const newMap = {
+          ...prev,
+          [key]: {
+            currentTime: 0,
+            duration: itemProgress ? itemProgress.duration : 0,
+            percentage: 100,
+            updatedAt: Date.now()
+          }
+        };
+        localStorage.setItem('tubehub_playback_progress', JSON.stringify(newMap));
+        return newMap;
+      });
+    } catch (e) {
+      console.error('Failed to clear playback progress', e);
+    }
+  };
+
+  const resumePlaybackPosition = (element, isAudio = false) => {
+    if (!element || !activePlayItem || videoHasSeekedRef.current) return;
+    
+    const key = `${activePlayItem.id}-${activePlayItem.quality || '320'}-${activePlayItem.ext}`;
+    const savedProgress = localStorage.getItem('tubehub_playback_progress');
+    if (savedProgress) {
+      try {
+        const progressMap = JSON.parse(savedProgress);
+        const itemProgress = progressMap[key];
+        if (itemProgress && itemProgress.currentTime) {
+          const duration = element.duration;
+          if (duration && !isNaN(duration)) {
+            const isNearEnd = itemProgress.currentTime >= duration - 5 || (itemProgress.percentage && itemProgress.percentage > 97);
+            if (!isNearEnd) {
+              element.currentTime = itemProgress.currentTime;
+              if (isAudio) {
+                setAudioCurrentTime(itemProgress.currentTime);
+              }
+            }
+            videoHasSeekedRef.current = true;
+          }
+        }
+      } catch (e) {
+        console.error('Failed to restore playback progress', e);
+      }
+    }
+  };
 
   const handleAudioPlayPause = () => {
     if (!audioElRef.current) return;
@@ -67,17 +178,51 @@ export default function App() {
 
   const handleAudioTimeUpdate = () => {
     if (!audioElRef.current) return;
-    setAudioCurrentTime(audioElRef.current.currentTime);
+    const currentTime = audioElRef.current.currentTime;
+    setAudioCurrentTime(currentTime);
+    if (activePlayItem) {
+      savePlaybackProgress(activePlayItem, currentTime, audioElRef.current.duration);
+    }
   };
 
   const handleAudioLoadedMetadata = () => {
     if (!audioElRef.current) return;
     setAudioDuration(audioElRef.current.duration);
+    resumePlaybackPosition(audioElRef.current, true);
   };
 
   const handleAudioEnded = () => {
     setAudioIsPlaying(false);
     setAudioCurrentTime(0);
+    if (activePlayItem) {
+      clearPlaybackProgress(activePlayItem);
+    }
+  };
+
+  const handleVideoTimeUpdate = () => {
+    if (!videoRef.current || !activePlayItem) return;
+    savePlaybackProgress(activePlayItem, videoRef.current.currentTime, videoRef.current.duration);
+  };
+
+  const handleVideoLoadedMetadata = () => {
+    if (!videoRef.current) return;
+    resumePlaybackPosition(videoRef.current, false);
+  };
+
+  const handleVideoCanPlay = () => {
+    if (!videoRef.current) return;
+    resumePlaybackPosition(videoRef.current, false);
+  };
+
+  const handleVideoEnded = () => {
+    if ('mediaSession' in navigator) {
+      // eslint-disable-next-line
+      navigator.mediaSession.playbackState = 'none';
+    }
+    if (activePlayItem) {
+      clearPlaybackProgress(activePlayItem);
+    }
+    closePlayer();
   };
 
   const handleAudioSeek = (e) => {
@@ -131,6 +276,7 @@ export default function App() {
             id: item.id,
             title: item.title,
             ext: item.ext,
+            quality: item.quality,
             src: localUrl
           });
           return;
@@ -142,6 +288,7 @@ export default function App() {
         id: item.id,
         title: item.title,
         ext: item.ext,
+        quality: item.quality,
         src: item.downloadUrl
       });
     } catch (err) {
@@ -152,6 +299,11 @@ export default function App() {
 
   const handleTabChange = (tab) => {
     setActiveTab(tab);
+    try {
+      localStorage.setItem('tubehub_active_tab', tab);
+    } catch (e) {
+      console.error('Failed to save active tab to localStorage', e);
+    }
     if (tab === 'converter' && activePlayItem && activePlayItem.ext === 'mp4' && videoRef.current) {
       // Switch tab within the app: trigger PiP automatically using the click gesture
       videoRef.current.requestPictureInPicture().catch(err => {
@@ -398,6 +550,7 @@ export default function App() {
                 savingIds={savingIds}
                 onDeleteHistoryItem={deleteHistoryItem}
                 onReconvert={handleReconvert}
+                playbackProgress={playbackProgress}
               />
             </div>
           )}
@@ -571,14 +724,12 @@ export default function App() {
                     navigator.mediaSession.playbackState = 'paused';
                   }
                 }}
+                onLoadedMetadata={handleVideoLoadedMetadata}
+                onTimeUpdate={handleVideoTimeUpdate}
+                onCanPlay={handleVideoCanPlay}
                 onEnterPictureInPicture={() => setIsPiPActive(true)}
                 onLeavePictureInPicture={handleLeavePiP}
-                onEnded={() => {
-                  if ('mediaSession' in navigator) {
-                    navigator.mediaSession.playbackState = 'none';
-                  }
-                  closePlayer();
-                }}
+                onEnded={handleVideoEnded}
                 className="w-full h-full object-contain"
               />
             </div>
