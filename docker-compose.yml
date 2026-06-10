@@ -4,7 +4,7 @@ services:
   tubehub:
     build: .
     ports:
-      - "3000:3000"
+      - "5174:3000"
     volumes:
       - tubehub-downloads:/app/downloads
     restart: unless-stopped
