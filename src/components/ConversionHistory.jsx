@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Trash2, Music, Video, Download, Play, Database, Loader2, Search, Library, Sparkles, RefreshCw } from 'lucide-react';
+import { Trash2, Download, Play, Database, Loader2, Search, Library, Sparkles, RefreshCw } from 'lucide-react';
 
 export default function ConversionHistory({ 
   history, 
@@ -190,49 +190,22 @@ export default function ConversionHistory({
 
                 {/* Card Body Info */}
                 <div className="p-5 flex-1 flex flex-col justify-between gap-4">
-                  <div className="flex gap-3.5 items-start">
-                    {/* Format Avatar representing "Channel Logo" */}
-                    <div className={`w-10 h-10 rounded-full flex items-center justify-center flex-shrink-0 shadow-inner border ${
-                      isVideo 
-                        ? 'bg-gradient-to-tr from-amber-600 to-orange-500 border-amber-500/20 text-white' 
-                        : 'bg-gradient-to-tr from-rose-600 to-pink-500 border-rose-500/20 text-white'
-                    }`}>
-                      {isVideo ? (
-                        <Video className="w-4.5 h-4.5" />
-                      ) : (
-                        <Music className="w-4.5 h-4.5" />
-                      )}
-                    </div>
+                  <div className="space-y-3.5 min-w-0">
+                    <h4 
+                      onClick={() => onPlay(item)}
+                      className="text-sm font-bold text-white leading-snug line-clamp-2 cursor-pointer hover:text-rose-400 transition-colors"
+                      title={item.title}
+                    >
+                      {item.title}
+                    </h4>
                     
-                    {/* Title & Channel details */}
-                    <div className="min-w-0 flex-1 space-y-1">
-                      <h4 
-                        onClick={() => onPlay(item)}
-                        className="text-sm font-bold text-white leading-snug line-clamp-2 cursor-pointer hover:text-rose-400 transition-colors"
-                        title={item.title}
-                      >
-                        {item.title}
-                      </h4>
-                      <div className="space-y-0.5">
-                        <p className="text-xs text-slate-400 font-semibold">
-                          TubeHub Media
-                        </p>
-                        <p className="text-[11px] text-slate-500 flex flex-wrap items-center gap-1 font-medium">
-                          <span>{item.downloadedAt}</span>
-                          <span>•</span>
-                          <span className={item.savedInBrowser ? "text-green-400" : "text-slate-500"}>
-                            {item.savedInBrowser ? 'Saved Offline' : 'Cloud Link'}
-                          </span>
-                          {progressPercent > 0 && (
-                            <>
-                              <span>•</span>
-                              <span className="text-rose-400 font-semibold">
-                                {progressPercent >= 100 ? 'Completed' : `${Math.round(progressPercent)}% played`}
-                              </span>
-                            </>
-                          )}
-                        </p>
-                      </div>
+                    <div className="flex items-center justify-between text-[11px] text-slate-500 font-medium">
+                      <span>{item.downloadedAt}</span>
+                      {progressPercent > 0 && (
+                        <span className="text-rose-400 font-semibold bg-rose-500/10 px-2.5 py-0.5 rounded-full select-none text-[10px]">
+                          {progressPercent >= 100 ? 'Completed' : `${Math.round(progressPercent)}% played`}
+                        </span>
+                      )}
                     </div>
                   </div>
 
