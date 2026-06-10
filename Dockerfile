@@ -2,6 +2,7 @@
 FROM node:20-bookworm-slim AS builder
 WORKDIR /app
 COPY package*.json ./
+ENV YOUTUBE_DL_SKIP_PYTHON_CHECK=1
 RUN npm ci
 COPY . .
 RUN npm run build
@@ -10,13 +11,14 @@ RUN npm run build
 FROM node:20-bookworm-slim
 WORKDIR /app
 
-# Install ffmpeg
-RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg \
+# Install ffmpeg and python3 (required for yt-dlp)
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg python3 \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy package files and install production-only dependencies
 COPY package*.json ./
+ENV YOUTUBE_DL_SKIP_PYTHON_CHECK=1
 RUN npm ci --only=production
 
 # Copy server code and built frontend assets

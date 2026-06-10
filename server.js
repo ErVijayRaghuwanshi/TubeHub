@@ -2,8 +2,8 @@ import express from 'express';
 import cors from 'cors';
 import path from 'path';
 import fs from 'fs';
-import { exec, spawn } from 'child_process';
-import ytdl from '@distube/ytdl-core';
+import { exec } from 'child_process';
+import youtubedl from 'youtube-dl-exec';
 import { fileURLToPath } from 'url';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -21,13 +21,11 @@ if (!fs.existsSync(DOWNLOADS_DIR)) {
 }
 
 // Detect FFmpeg presence
-let hasFfmpeg = false;
 exec('ffmpeg -version', (err) => {
   if (!err) {
-    hasFfmpeg = true;
     console.log('FFmpeg is available on the system.');
   } else {
-    console.log('FFmpeg is NOT available. Media operations will fallback to direct streams (M4A for audio, pre-muxed for video).');
+    console.log('FFmpeg is NOT available on the system. Audio/Video conversion might fail outside the container.');
   }
 });
 
@@ -39,9 +37,16 @@ app.get('/api/v5/info/:videoId', async (req, res) => {
   const { videoId } = req.params;
   try {
     console.log(`Fetching info for video: ${videoId}`);
-    const info = await ytdl.getInfo(videoId);
+    const videoUrl = `https://www.youtube.com/watch?v=${videoId}`;
     
-    // Group audio formats (we will transcode from highest source to target bitrate)
+    const output = await youtubedl(videoUrl, {
+      dumpSingleJson: true,
+      noCheckCertificates: true,
+      noWarnings: true,
+      preferFreeFormats: true,
+    });
+    
+    // Group audio formats (we transcode from source to target bitrate)
     const audioFormats = [
       { token: `audio-320-${videoId}`, quality: 320, ext: 'mp3' },
       { token: `audio-256-${videoId}`, quality: 256, ext: 'mp3' },
@@ -49,7 +54,7 @@ app.get('/api/v5/info/:videoId', async (req, res) => {
     ];
 
     // Group video formats
-    const formats = info.formats;
+    const formats = output.formats || [];
     const videoFormats = [];
     
     const heights = [1080, 720, 480, 360];
@@ -60,9 +65,9 @@ app.get('/api/v5/info/:videoId', async (req, res) => {
       }
     });
 
-    // In case no standard heights found, fallback to pre-muxed formats
+    // Fallback if no specific heights are resolved
     if (videoFormats.length === 0) {
-      const hasMuxed = formats.some(f => f.hasVideo && f.hasAudio);
+      const hasMuxed = formats.some(f => f.vcodec !== 'none' && f.acodec !== 'none');
       if (hasMuxed) {
         videoFormats.push({ token: `video-720-${videoId}`, quality: 720, ext: 'mp4' });
       }
@@ -70,8 +75,8 @@ app.get('/api/v5/info/:videoId', async (req, res) => {
 
     res.json({
       videoId,
-      title: info.videoDetails.title,
-      duration: parseInt(info.videoDetails.lengthSeconds) || 0,
+      title: output.title,
+      duration: parseInt(output.duration) || 0,
       formats: {
         audio: audioFormats,
         video: videoFormats
@@ -141,197 +146,76 @@ app.get('/api/v5/download/:jobId', (req, res) => {
   res.sendFile(job.filePath);
 });
 
-// Background job executor
+// Background job executor using youtube-dl-exec (yt-dlp)
 async function runConversionJob(jobId, videoId, type, quality) {
   const job = jobs[jobId];
   try {
-    const info = await ytdl.getInfo(videoId);
-    job.title = info.videoDetails.title;
-    
+    const videoUrl = `https://www.youtube.com/watch?v=${videoId}`;
     const outputPath = path.join(DOWNLOADS_DIR, `${jobId}.${job.ext}`);
     job.filePath = outputPath;
 
-    if (type === 'audio') {
-      const audioFormat = ytdl.chooseFormat(info.formats, { quality: 'highestaudio' });
-      if (!audioFormat) {
-        throw new Error('No audio format found.');
-      }
-
-      if (hasFfmpeg) {
-        const audioStream = ytdl(videoId, { format: audioFormat });
-        const ffmpegProcess = spawn('ffmpeg', [
-          '-i', 'pipe:0',
-          '-b:a', `${quality}k`,
-          '-f', 'mp3',
-          '-y',
-          outputPath
-        ]);
-
-        audioStream.pipe(ffmpegProcess.stdin);
-
-        let totalDuration = parseInt(info.videoDetails.lengthSeconds) || 0;
-        
-        ffmpegProcess.stderr.on('data', (data) => {
-          const text = data.toString();
-          const match = text.match(/time=(\d+):(\d+):(\d+\.\d+)/);
-          if (match && totalDuration > 0) {
-            const hours = parseInt(match[1]);
-            const minutes = parseInt(match[2]);
-            const seconds = parseFloat(match[3]);
-            const elapsed = hours * 3600 + minutes * 60 + seconds;
-            job.progress = Math.min((elapsed / totalDuration) * 100, 99);
-          }
-        });
-
-        ffmpegProcess.on('close', (code) => {
-          if (code === 0) {
-            job.progress = 100;
-            job.status = 'completed';
-          } else {
-            console.error(`FFmpeg audio convert failed with exit code ${code}`);
-            job.status = 'failed';
-          }
-        });
-
-        audioStream.on('error', (err) => {
-          console.error('Audio stream download error:', err);
-          job.status = 'failed';
-        });
-        
-      } else {
-        // Fallback: save raw M4A/WebM audio stream if FFmpeg is missing
-        const rawExt = audioFormat.container || 'm4a';
-        job.ext = rawExt;
-        const rawOutputPath = path.join(DOWNLOADS_DIR, `${jobId}.${rawExt}`);
-        job.filePath = rawOutputPath;
-
-        const stream = ytdl(videoId, { format: audioFormat });
-        const writer = fs.createWriteStream(rawOutputPath);
-        
-        let downloaded = 0;
-        const totalSize = parseInt(audioFormat.contentLength) || 1;
-
-        stream.on('data', (chunk) => {
-          downloaded += chunk.length;
-          job.progress = Math.min((downloaded / totalSize) * 100, 99);
-        });
-
-        stream.pipe(writer);
-
-        writer.on('finish', () => {
-          job.progress = 100;
-          job.status = 'completed';
-        });
-
-        stream.on('error', (err) => {
-          console.error('Audio stream raw download error:', err);
-          job.status = 'failed';
-        });
-      }
-      
-    } else {
-      // Video Download & Muxing
-      const formats = info.formats;
-      
-      if (hasFfmpeg) {
-        // Download separate high-res video-only and highest audio-only streams and mux them
-        const videoFormat = formats.find(f => f.height === quality && f.container === 'mp4' && !f.audioBitrate);
-        const audioFormat = ytdl.chooseFormat(formats, { quality: 'highestaudio' });
-        
-        const actualVideoFormat = videoFormat || ytdl.chooseFormat(formats, { quality: 'highestvideo' });
-        
-        const videoTempPath = path.join(DOWNLOADS_DIR, `${jobId}_video.tmp`);
-        const audioTempPath = path.join(DOWNLOADS_DIR, `${jobId}_audio.tmp`);
-        
-        const videoStream = ytdl(videoId, { format: actualVideoFormat });
-        const videoWriter = fs.createWriteStream(videoTempPath);
-        
-        let videoProgress = 0;
-        let audioProgress = 0;
-
-        videoStream.on('data', (chunk) => {
-          videoProgress += chunk.length;
-          const videoSize = parseInt(actualVideoFormat.contentLength) || 1;
-          job.progress = Math.min(((videoProgress / videoSize) * 80) + (audioProgress * 20), 80);
-        });
-
-        videoStream.pipe(videoWriter);
-        
-        videoWriter.on('finish', () => {
-          const audioStream = ytdl(videoId, { format: audioFormat });
-          const audioWriter = fs.createWriteStream(audioTempPath);
-          
-          audioStream.on('data', (chunk) => {
-            audioProgress += chunk.length;
-            const audioSize = parseInt(audioFormat.contentLength) || 1;
-            job.progress = Math.min(80 + ((audioProgress / audioSize) * 15), 95);
-          });
-          
-          audioStream.pipe(audioWriter);
-          
-          audioWriter.on('finish', () => {
-            // Merge streams with FFmpeg
-            const ffmpegProcess = spawn('ffmpeg', [
-              '-i', videoTempPath,
-              '-i', audioTempPath,
-              '-c:v', 'copy',
-              '-c:a', 'aac',
-              '-y',
-              outputPath
-            ]);
-            
-            ffmpegProcess.on('close', (code) => {
-              try {
-                fs.unlinkSync(videoTempPath);
-                fs.unlinkSync(audioTempPath);
-              } catch (e) {
-                console.warn('Temporary file cleanup failed:', e);
-              }
-              
-              if (code === 0) {
-                job.progress = 100;
-                job.status = 'completed';
-              } else {
-                console.error(`FFmpeg video mux failed with exit code ${code}`);
-                job.status = 'failed';
-              }
-            });
-          });
-        });
-        
-      } else {
-        // Fallback: download the best pre-muxed resolution (audio+video in one file) if FFmpeg is missing
-        const muxedFormat = formats.find(f => f.height <= quality && f.hasVideo && f.hasAudio) || formats.find(f => f.hasVideo && f.hasAudio);
-        if (!muxedFormat) {
-          throw new Error('No pre-muxed video format found.');
-        }
-
-        const stream = ytdl(videoId, { format: muxedFormat });
-        const writer = fs.createWriteStream(outputPath);
-        
-        let downloaded = 0;
-        const totalSize = parseInt(muxedFormat.contentLength) || 1;
-
-        stream.on('data', (chunk) => {
-          downloaded += chunk.length;
-          job.progress = Math.min((downloaded / totalSize) * 100, 99);
-        });
-
-        stream.pipe(writer);
-
-        writer.on('finish', () => {
-          job.progress = 100;
-          job.status = 'completed';
-        });
-
-        stream.on('error', (err) => {
-          console.error('Muxed video download error:', err);
-          job.status = 'failed';
-        });
-      }
+    // Fetch metadata first to extract title
+    try {
+      const output = await youtubedl(videoUrl, {
+        dumpSingleJson: true,
+        noCheckCertificates: true,
+        noWarnings: true
+      });
+      job.title = output.title;
+    } catch (e) {
+      console.warn('Metadata fetch failed during job execution, using default video ID:', e);
+      job.title = `Video ${videoId}`;
     }
+
+    // Set up flags for yt-dlp execution
+    const flags = {
+      output: outputPath,
+      noCheckCertificates: true,
+      noWarnings: true
+    };
+
+    if (type === 'audio') {
+      flags.extractAudio = true;
+      flags.audioFormat = 'mp3';
+      flags.audioQuality = `${quality}K`;
+    } else {
+      // Best video quality up to requested height + best audio, muxed to mp4
+      flags.format = `bestvideo[height<=${quality}]+bestaudio/best`;
+      flags.mergeOutputFormat = 'mp4';
+    }
+
+    console.log(`Starting yt-dlp download/convert for job ${jobId} (Type: ${type}, Quality: ${quality})...`);
+    
+    // Spawn the yt-dlp subprocess
+    const child = youtubedl.exec(videoUrl, flags);
+    
+    child.stdout.on('data', (data) => {
+      const text = data.toString();
+      const match = text.match(/\[download\]\s+(\d+(?:\.\d+)?)%/);
+      if (match) {
+        const percentage = parseFloat(match[1]);
+        job.progress = Math.min(percentage, 99);
+      }
+    });
+
+    child.stderr.on('data', (data) => {
+      console.warn(`[yt-dlp stderr for job ${jobId}]:`, data.toString());
+    });
+
+    // Wait for process completion
+    await child;
+
+    // Verify output file existence
+    if (fs.existsSync(outputPath)) {
+      job.progress = 100;
+      job.status = 'completed';
+      console.log(`Job ${jobId} completed successfully! Saved to ${outputPath}`);
+    } else {
+      throw new Error(`Output file not found at ${outputPath}`);
+    }
+
   } catch (error) {
-    console.error('Conversion job failed:', error);
+    console.error(`Conversion job ${jobId} failed:`, error);
     job.status = 'failed';
   }
 }
