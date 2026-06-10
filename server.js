@@ -220,6 +220,57 @@ async function runConversionJob(jobId, videoId, type, quality) {
   }
 }
 
+// Scheduled downloads cleanup routine
+const CLEANUP_THRESHOLD_HOURS = parseInt(process.env.CLEANUP_THRESHOLD_HOURS) || 24;
+const CLEANUP_INTERVAL_MINUTES = parseInt(process.env.CLEANUP_INTERVAL_MINUTES) || 60;
+
+function startCleanupSchedule() {
+  console.log(`Scheduling background cleanup every ${CLEANUP_INTERVAL_MINUTES} minutes. Files older than ${CLEANUP_THRESHOLD_HOURS} hours will be deleted.`);
+  
+  setInterval(() => {
+    console.log('Running scheduled downloads cleanup...');
+    fs.readdir(DOWNLOADS_DIR, (err, files) => {
+      if (err) {
+        console.error('Failed to read downloads directory for cleanup:', err);
+        return;
+      }
+      
+      const now = Date.now();
+      const thresholdMs = CLEANUP_THRESHOLD_HOURS * 60 * 60 * 1000;
+      
+      files.forEach((file) => {
+        const filePath = path.join(DOWNLOADS_DIR, file);
+        
+        fs.stat(filePath, (err, stats) => {
+          if (err) {
+            console.error(`Failed to stat file ${file} for cleanup:`, err);
+            return;
+          }
+          
+          const ageMs = now - stats.mtimeMs;
+          if (ageMs > thresholdMs) {
+            fs.unlink(filePath, (err) => {
+              if (err) {
+                console.error(`Failed to delete old file ${file}:`, err);
+              } else {
+                console.log(`Deleted stale download file: ${file} (Age: ${(ageMs / (60 * 60 * 1000)).toFixed(1)} hours)`);
+                
+                // Also remove from jobs database if tracked
+                const jobId = path.basename(file, path.extname(file));
+                const baseJobId = jobId.split('_')[0];
+                if (jobs[baseJobId]) {
+                  delete jobs[baseJobId];
+                  console.log(`Removed job ${baseJobId} from tracking database.`);
+                }
+              }
+            });
+          }
+        });
+      });
+    });
+  }, CLEANUP_INTERVAL_MINUTES * 60 * 1000);
+}
+
 // Serve static frontend assets from dist folder (production deployment)
 app.use(express.static(path.join(__dirname, 'dist')));
 
@@ -230,4 +281,5 @@ app.get('*', (req, res) => {
 
 app.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}`);
+  startCleanupSchedule();
 });

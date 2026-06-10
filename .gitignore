@@ -23,3 +23,8 @@ git_bkp
 *.njsproj
 *.sln
 *.sw?
+
+# Environment files
+.env
+.env.*
+

@@ -7,6 +7,9 @@ services:
       - "5174:3000"
     volumes:
       - tubehub-downloads:/app/downloads
+    environment:
+      - CLEANUP_THRESHOLD_HOURS=${CLEANUP_THRESHOLD_HOURS:-24}
+      - CLEANUP_INTERVAL_MINUTES=${CLEANUP_INTERVAL_MINUTES:-60}
     restart: unless-stopped
 
 volumes:
