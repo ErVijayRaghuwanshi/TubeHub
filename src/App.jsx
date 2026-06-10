@@ -7,7 +7,6 @@ import ProgressBar from './components/ProgressBar';
 import DownloadAction from './components/DownloadAction';
 import ConversionHistory from './components/ConversionHistory';
 import Footer from './components/Footer';
-import TurnstileWidget from './components/TurnstileWidget';
 import FormatSelector from './components/FormatSelector';
 import { getMedia } from './services/db';
 import { X, Volume2, Film, PictureInPicture, Play, Pause, Volume1, VolumeX, Music, SkipBack, SkipForward, Maximize, Minimize } from 'lucide-react';
@@ -22,8 +21,6 @@ export default function App() {
     history,
     currentVideo,
     downloadUrl,
-    turnstileToken,
-    setTurnstileToken,
     audioFormats,
     videoFormats,
     selectedFormat,
@@ -623,18 +620,6 @@ export default function App() {
                     handleConvert={handleConvert} 
                     errorMsg={errorMsg} 
                   />
-
-                  {/* Cloudflare Turnstile Human Verification Widget */}
-                  {(status === 'idle' || status === 'error') && (
-                    <TurnstileWidget
-                      onVerify={(token) => setTurnstileToken(token)}
-                      onExpire={() => setTurnstileToken('')}
-                      onError={(err) => {
-                        console.error('Turnstile verification failed:', err);
-                        setTurnstileToken('');
-                      }}
-                    />
-                  )}
 
                   {/* Status Indicator Panel */}
                   {showStatusPanel && (

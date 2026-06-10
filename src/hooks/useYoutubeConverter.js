@@ -8,7 +8,7 @@ import { saveMedia, deleteMedia, hasMedia, getMedia } from '../services/db';
  * @returns {string|boolean} The video ID if valid, otherwise false.
  */
 export const isValidYoutubeUrl = (url) => {
-  const match = url.match(/(?:https?:\/\/)?(?:www\.)?(?:youtube\.com\/(?:[^\/\n\s]+\/\S+\/|(?:v|e(?:mbed)?)\/|\S*?[?&]v=)|youtu\.be\/)([a-zA-Z0-9_-]{11})/);
+  const match = url.match(/(?:https?:\/\/)?(?:www\.)?(?:youtube\.com\/(?:[^/\n\s]+\/\S+\/|(?:v|e(?:mbed)?)\/|\S*?[?&]v=)|youtu\.be\/)([a-zA-Z0-9_-]{11})/);
   return match ? match[1] : false;
 };
 
@@ -46,7 +46,6 @@ export function useYoutubeConverter() {
   const [errorMsg, setErrorMsg] = useState('');
   const [currentVideo, setCurrentVideo] = useState(null);
   const [downloadUrl, setDownloadUrl] = useState('');
-  const [turnstileToken, setTurnstileToken] = useState('');
 
   // Formats states
   const [audioFormats, setAudioFormats] = useState([]);
@@ -105,6 +104,7 @@ export function useYoutubeConverter() {
       }
     };
     syncHistoryWithDB();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   /**
@@ -125,11 +125,7 @@ export function useYoutubeConverter() {
       return;
     }
 
-    if (!turnstileToken) {
-      setErrorMsg('Please complete the security check (Cloudflare Turnstile) before continuing.');
-      setStatus('error');
-      return;
-    }
+
 
     // Reset states for a new parsing run
     setErrorMsg('');
@@ -192,8 +188,8 @@ export function useYoutubeConverter() {
     setStatus('converting');
 
     try {
-      // Start conversion job with Turnstile token
-      const convertData = await startConversion(format.token, turnstileToken);
+      // Start conversion job
+      const convertData = await startConversion(format.token);
       const jobId = convertData.jobId;
 
       if (!jobId) {
@@ -365,7 +361,7 @@ export function useYoutubeConverter() {
       const a = document.createElement('a');
       a.href = localUrl;
       // Sanitize filename for operating system compatibility
-      const sanitizedTitle = (item.title || 'download').replace(/[\/\?<>\\:\*\|"]/g, '_');
+      const sanitizedTitle = (item.title || 'download').replace(/[/?<>\\:*|"]/g, '_');
       a.download = `${sanitizedTitle}.${item.ext}`;
       document.body.appendChild(a);
       a.click();
@@ -383,7 +379,6 @@ export function useYoutubeConverter() {
     setCurrentVideo(null);
     setProgress(0);
     setDownloadUrl('');
-    setTurnstileToken('');
     setAudioFormats([]);
     setVideoFormats([]);
     setSelectedFormat(null);
@@ -429,8 +424,6 @@ export function useYoutubeConverter() {
     history,
     currentVideo,
     downloadUrl,
-    turnstileToken,
-    setTurnstileToken,
     audioFormats,
     videoFormats,
     selectedFormat,

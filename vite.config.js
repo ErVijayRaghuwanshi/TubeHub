@@ -9,13 +9,8 @@ export default defineConfig({
   server: {
     proxy: {
       '/api/v5': {
-        target: 'https://api.cdnframe.com',
+        target: 'http://localhost:3000',
         changeOrigin: true,
-        secure: true,
-        headers: {
-          Referer: 'https://clickapi.net/',
-          Origin: 'https://clickapi.net',
-        },
       },
     },
     port: 5174,

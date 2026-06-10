@@ -12,10 +12,14 @@
     "lint": "eslint .",
     "preview": "vite preview",
     "predeploy": "npm run build",
-    "deploy": "gh-pages -d dist"
+    "deploy": "gh-pages -d dist",
+    "server": "node server.js"
   },
   "dependencies": {
+    "@distube/ytdl-core": "^4.15.9",
     "@tailwindcss/vite": "^4.3.0",
+    "cors": "^2.8.5",
+    "express": "^4.21.2",
     "lucide-react": "^0.469.0",
     "react": "^19.2.6",
     "react-dom": "^19.2.6",
