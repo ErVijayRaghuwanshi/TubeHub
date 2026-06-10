@@ -237,16 +237,7 @@ export default function ConversionHistory({
                   </div>
 
                   {/* Card Action Footer */}
-                  <div className="flex items-center justify-between border-t border-white/5 pt-4 mt-auto">
-                    {/* Play button */}
-                    <button
-                      onClick={() => onPlay(item)}
-                      className="px-4 py-2.5 bg-gradient-to-r from-red-600 to-rose-600 hover:from-red-500 hover:to-rose-500 text-white border border-transparent rounded-xl flex items-center justify-center gap-1.5 text-xs font-bold transition-all duration-300 shadow-md shadow-red-600/10 hover:shadow-red-600/25 active:scale-95 cursor-pointer"
-                    >
-                      <Play className="w-3.5 h-3.5 fill-current ml-0.5" />
-                      Play
-                    </button>
-
+                  <div className="flex items-center justify-end border-t border-white/5 pt-4 mt-auto">
                     {/* Download, Database & Delete actions */}
                     <div className="flex items-center gap-1.5">
                       {/* Re-convert button */}
