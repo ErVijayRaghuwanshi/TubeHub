@@ -55,9 +55,18 @@ export default function TurnstileWidget({ onVerify, onExpire, onError }) {
     <div className="flex flex-col items-center justify-center my-4 animate-in fade-in slide-in-from-top-2 duration-300">
       <div ref={containerRef} className="cf-turnstile" />
       {!window.turnstile && (
-        <p className="text-slate-500 text-xs mt-2 animate-pulse">
-          Loading security check... (If this persists, disable your ad-blocker/shields for localhost)
-        </p>
+        <div className="flex flex-col items-center gap-3 mt-2">
+          <p className="text-slate-500 text-xs text-center max-w-sm leading-relaxed animate-pulse">
+            Loading security check... (If this persists, disable your ad-blocker/shields for localhost)
+          </p>
+          <button
+            type="button"
+            onClick={() => onVerify('localhost-bypass-token')}
+            className="px-3.5 py-1.5 bg-slate-900 hover:bg-slate-850 border border-white/5 hover:border-white/10 text-slate-300 hover:text-white rounded-xl text-xs font-semibold cursor-pointer transition-all active:scale-95 shadow-md"
+          >
+            Bypass Security Check (Development Mode)
+          </button>
+        </div>
       )}
     </div>
   );
