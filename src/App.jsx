@@ -104,6 +104,8 @@ export default function App() {
     const routeParams = { ...params };
     if (pageName === 'watch' && params.v) {
       routeParams.videoId = params.v;
+    } else if (pageName === 'home') {
+      routeParams.query = params.q || '';
     }
     setRoute({ name: pageName, ...routeParams });
   };
@@ -933,35 +935,53 @@ export default function App() {
                           </select>
                         </div>
 
-                        {/* Download offline action */}
-                        {selectedFormat && (
-                          <button
-                            onClick={handleSaveToBrowser}
-                            disabled={isSavingToBrowser || isSavedToBrowser}
-                            className={`p-2 rounded-full transition cursor-pointer border ${
-                              isSavedToBrowser 
-                                ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-400' 
-                                : 'bg-white/5 border-white/10 text-slate-300 hover:text-white active:scale-95'
-                            }`}
-                            title={isSavedToBrowser ? "Saved to browser offline library" : "Save offline to browser storage"}
-                          >
-                            {isSavingToBrowser ? (
-                              <div className="w-5 h-5 border-2 border-slate-300 border-t-transparent rounded-full animate-spin" />
-                            ) : (
-                              <Library className="w-4.5 h-4.5" />
-                            )}
-                          </button>
-                        )}
+                        {/* Save to Browser Offline Button */}
+                        <button
+                          onClick={handleSaveToBrowser}
+                          disabled={!selectedFormat || !downloadUrl || isSavingToBrowser || isSavedToBrowser}
+                          className={`p-2 rounded-full transition border ${
+                            isSavedToBrowser 
+                              ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-400 cursor-default' 
+                              : !selectedFormat || !downloadUrl
+                                ? 'opacity-40 border-white/5 text-slate-500 cursor-not-allowed'
+                                : 'bg-white/5 border-white/10 text-slate-300 hover:text-white active:scale-95 cursor-pointer'
+                          }`}
+                          title={
+                            isSavedToBrowser 
+                              ? "Saved to browser offline library" 
+                              : !selectedFormat 
+                                ? "Select a format quality first to enable offline saving" 
+                                : !downloadUrl 
+                                  ? "Waiting for conversion to complete..." 
+                                  : "Save offline to browser storage"
+                          }
+                        >
+                          {isSavingToBrowser ? (
+                            <div className="w-4.5 h-4.5 border-2 border-slate-300 border-t-transparent rounded-full animate-spin" />
+                          ) : (
+                            <Library className="w-4.5 h-4.5" />
+                          )}
+                        </button>
                         
-                        {selectedFormat && downloadUrl && (
-                          <button
-                            onClick={handleDownload}
-                            className="p-2 bg-rose-600 hover:bg-rose-700 text-white rounded-full transition cursor-pointer active:scale-95 border border-rose-500/20"
-                            title="Download file to computer"
-                          >
-                            <Download className="w-4.5 h-4.5" />
-                          </button>
-                        )}
+                        {/* Download to File System Button */}
+                        <button
+                          onClick={handleDownload}
+                          disabled={!selectedFormat || !downloadUrl}
+                          className={`p-2 rounded-full transition border ${
+                            !selectedFormat || !downloadUrl
+                              ? 'opacity-40 border-white/5 text-slate-500 cursor-not-allowed'
+                              : 'bg-rose-600 hover:bg-rose-700 text-white active:scale-95 cursor-pointer border-rose-500/20'
+                          }`}
+                          title={
+                            !selectedFormat 
+                              ? "Select a format quality first to enable downloading" 
+                              : !downloadUrl 
+                                ? "Waiting for conversion to complete..." 
+                                : "Download file to computer"
+                          }
+                        >
+                          <Download className="w-4.5 h-4.5" />
+                        </button>
                       </div>
                     </div>
 
