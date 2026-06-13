@@ -149,6 +149,42 @@ export default function App() {
 
   // Playback States
   const [activePlayItem, setActivePlayItem] = useState(null); // { title, ext, src, id }
+  const [posterUrl, setPosterUrl] = useState(null);
+
+  useEffect(() => {
+    let objectUrl = null;
+    async function loadPoster() {
+      if (!activePlayItem) {
+        setPosterUrl(null);
+        return;
+      }
+      
+      if (activePlayItem.isOffline) {
+        try {
+          const storageId = `${activePlayItem.id}-${activePlayItem.quality}-${activePlayItem.ext}`;
+          const blob = await getMedia(`${storageId}-thumbnail`).catch(() => null);
+          if (blob) {
+            objectUrl = URL.createObjectURL(blob);
+            setPosterUrl(objectUrl);
+            return;
+          }
+        } catch (err) {
+          console.warn('Failed to load offline poster:', err);
+        }
+      }
+      
+      // Fallback to online thumbnail
+      setPosterUrl(`https://img.youtube.com/vi/${activePlayItem.id}/hqdefault.jpg`);
+    }
+    
+    loadPoster();
+    
+    return () => {
+      if (objectUrl) {
+        URL.revokeObjectURL(objectUrl);
+      }
+    };
+  }, [activePlayItem]);
 
   // Custom Video Player States
   const videoRef = useRef(null);
@@ -299,7 +335,8 @@ export default function App() {
           ext: offlineItem.ext,
           src: localUrl,
           id: videoId,
-          isOffline: true
+          isOffline: true,
+          quality: offlineItem.quality
         });
       } else {
         console.log('Resolving watch player to privacy-first backend stream proxy.');
@@ -712,6 +749,7 @@ export default function App() {
                       src={activePlayItem.src} 
                       autoPlay 
                       autoPictureInPicture={true}
+                      poster={posterUrl || undefined}
                       onClick={handleVideoPlayPause}
                       onDoubleClick={toggleFullscreen}
                       onPlay={() => {
