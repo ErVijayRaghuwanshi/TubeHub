@@ -1021,41 +1021,76 @@ export default function App() {
                   Recommended Videos
                 </h3>
                 <div className="flex flex-col gap-3">
-                  {feedVideos.filter(v => v.id !== route.videoId).slice(0, 10).map((video) => (
-                    <div 
-                      key={video.id} 
-                      onClick={() => navigate('watch', { v: video.id })}
-                      className="flex gap-2.5 group cursor-pointer"
-                    >
-                      <div className="relative w-40 aspect-video rounded-lg overflow-hidden bg-slate-900 border border-white/5 shrink-0">
-                        <img 
-                          src={video.snippet?.thumbnails?.medium?.url || 'https://img.youtube.com/vi/dQw4w9WgXcQ/mqdefault.jpg'} 
-                          alt={video.snippet?.title}
-                          className="w-full h-full object-cover group-hover:scale-105 transition duration-200"
-                          loading="lazy"
-                        />
-                        {video.contentDetails?.duration && (
-                          <div className="absolute bottom-1 right-1 bg-black/85 text-[9px] font-bold text-white px-1 py-0.2 rounded font-mono">
-                            {formatISO8601Duration(video.contentDetails.duration)}
+                  {activePlayItem?.isOffline && history.filter(item => item.savedInBrowser && item.id !== route.videoId).length > 0 ? (
+                    history.filter(item => item.savedInBrowser && item.id !== route.videoId).slice(0, 10).map((item) => {
+                      const storageId = `${item.id}-${item.quality}-${item.ext}`;
+                      return (
+                        <div 
+                          key={storageId} 
+                          onClick={() => navigate('watch', { v: item.id })}
+                          className="flex gap-2.5 group cursor-pointer"
+                        >
+                          <div className="relative w-40 aspect-video rounded-lg overflow-hidden bg-slate-900 border border-white/5 shrink-0">
+                            <OfflineThumbnail 
+                              storageId={storageId} 
+                              fallbackId={item.id} 
+                              className="w-full h-full object-cover group-hover:scale-105 transition duration-200"
+                            />
+                            {item.duration && (
+                              <div className="absolute bottom-1 right-1 bg-black/85 text-[9px] font-bold text-white px-1.5 py-0.5 rounded font-mono">
+                                {formatTime(item.duration)}
+                              </div>
+                            )}
                           </div>
-                        )}
-                      </div>
-                      
-                      <div className="flex flex-col min-w-0">
-                        <span className="text-xs font-bold text-white leading-tight line-clamp-2 group-hover:text-rose-400 transition" title={video.snippet?.title}>
-                          {video.snippet?.title}
-                        </span>
-                        <span className="text-[10px] text-slate-400 mt-1 truncate">
-                          {video.snippet?.channelTitle}
-                        </span>
-                        <div className="flex items-center gap-1 text-[9px] text-slate-500 mt-0.5 select-none">
-                          <span>{formatViewCount(video.statistics?.viewCount)}</span>
-                          <span>•</span>
-                          <span>{getRelativeTime(video.snippet?.publishedAt)}</span>
+                          
+                          <div className="flex flex-col min-w-0">
+                            <span className="text-xs font-bold text-white leading-tight line-clamp-2 group-hover:text-rose-400 transition" title={item.title}>
+                              {item.title}
+                            </span>
+                            <span className="text-[10px] text-slate-400 mt-1 truncate">
+                              Offline Video • {item.quality}{item.ext === 'mp3' ? 'kbps' : 'p'}
+                            </span>
+                          </div>
+                        </div>
+                      );
+                    })
+                  ) : (
+                    feedVideos.filter(v => v.id !== route.videoId).slice(0, 10).map((video) => (
+                      <div 
+                        key={video.id} 
+                        onClick={() => navigate('watch', { v: video.id })}
+                        className="flex gap-2.5 group cursor-pointer"
+                      >
+                        <div className="relative w-40 aspect-video rounded-lg overflow-hidden bg-slate-900 border border-white/5 shrink-0">
+                          <img 
+                            src={video.snippet?.thumbnails?.medium?.url || 'https://img.youtube.com/vi/dQw4w9WgXcQ/mqdefault.jpg'} 
+                            alt={video.snippet?.title}
+                            className="w-full h-full object-cover group-hover:scale-105 transition duration-200"
+                            loading="lazy"
+                          />
+                          {video.contentDetails?.duration && (
+                            <div className="absolute bottom-1 right-1 bg-black/85 text-[9px] font-bold text-white px-1 py-0.2 rounded font-mono">
+                              {formatISO8601Duration(video.contentDetails.duration)}
+                            </div>
+                          )}
+                        </div>
+                        
+                        <div className="flex flex-col min-w-0">
+                          <span className="text-xs font-bold text-white leading-tight line-clamp-2 group-hover:text-rose-400 transition" title={video.snippet?.title}>
+                            {video.snippet?.title}
+                          </span>
+                          <span className="text-[10px] text-slate-400 mt-1 truncate">
+                            {video.snippet?.channelTitle}
+                          </span>
+                          <div className="flex items-center gap-1 text-[9px] text-slate-500 mt-0.5 select-none">
+                            <span>{formatViewCount(video.statistics?.viewCount)}</span>
+                            <span>•</span>
+                            <span>{getRelativeTime(video.snippet?.publishedAt)}</span>
+                          </div>
                         </div>
                       </div>
-                    </div>
-                  ))}
+                    ))
+                  )}
                 </div>
               </div>
 
