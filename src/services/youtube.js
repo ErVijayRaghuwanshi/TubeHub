@@ -66,20 +66,3 @@ export async function fetchVideoDetails(videoId) {
   return response.json();
 }
 
-/**
- * Fetches comment threads for a video.
- * @param {string} videoId 
- * @param {string} pageToken Page pagination token
- * @returns {Promise<object>} Comment threads list response
- */
-export async function fetchComments(videoId, pageToken = '') {
-  let url = `${BASE_URL}/comments/${videoId}`;
-  if (pageToken) url += `?pageToken=${pageToken}`;
-
-  const response = await fetch(url, { headers: getApiHeaders() });
-  if (!response.ok) {
-    const errorData = await response.json().catch(() => ({}));
-    throw new Error(errorData.message || 'Failed to fetch comments.');
-  }
-  return response.json();
-}

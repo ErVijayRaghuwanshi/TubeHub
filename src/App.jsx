@@ -1,11 +1,11 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { useYoutubeConverter } from './hooks/useYoutubeConverter';
-import { fetchTrending, searchVideos, fetchVideoDetails, fetchComments } from './services/youtube';
+import { fetchTrending, searchVideos, fetchVideoDetails } from './services/youtube';
 import { getMedia } from './services/db';
 import { 
   X, Volume2, Film, PictureInPicture, Play, Pause, Volume1, VolumeX, 
   SkipBack, SkipForward, Maximize, Minimize, Search, Settings, Clock, 
-  Download, ChevronDown, ChevronUp, ThumbsUp, Menu, Library
+  Download, ChevronDown, ChevronUp, Menu, Library
 } from 'lucide-react';
 
 // Sub-component to render offline thumbnails loaded from IndexedDB
@@ -137,11 +137,8 @@ export default function App() {
 
   // Watch page state
   const [watchDetails, setWatchDetails] = useState(null);
-  const [watchComments, setWatchComments] = useState([]);
-  const [watchCommentsToken, setWatchCommentsToken] = useState('');
   const [watchLoading, setWatchLoading] = useState(false);
   const [descExpanded, setDescExpanded] = useState(false);
-  const [expandedComments, setExpandedComments] = useState({}); // threadId -> boolean
   const [autoplayEnabled, setAutoplayEnabled] = useState(true);
 
   // Playback States
@@ -258,24 +255,17 @@ export default function App() {
   const loadWatchDetails = useCallback(async (videoId) => {
     setWatchLoading(true);
     setWatchDetails(null);
-    setWatchComments([]);
-    setWatchCommentsToken('');
     
     // Auto initiate conversion fetching to resolve MP3/MP4 conversion download option formats
     handleConvert(videoId);
 
     try {
-      // 1. Fetch metadata and comments in parallel
-      const [details, commentsData] = await Promise.all([
-        fetchVideoDetails(videoId).catch(() => null),
-        fetchComments(videoId).catch(() => ({ items: [] }))
-      ]);
+      // 1. Fetch metadata
+      const details = await fetchVideoDetails(videoId).catch(() => null);
 
       if (details) {
         setWatchDetails(details);
       }
-      setWatchComments(commentsData.items || []);
-      setWatchCommentsToken(commentsData.nextPageToken || '');
 
       // 2. Determine if video exists offline in browser IndexedDB
       let offlineBlob = null;
@@ -338,17 +328,6 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [route.name, route.videoId, loadWatchDetails]);
 
-  // Load more comments
-  const loadMoreComments = async () => {
-    if (!watchCommentsToken || !watchDetails) return;
-    try {
-      const commentsData = await fetchComments(watchDetails.id, watchCommentsToken);
-      setWatchComments(prev => [...prev, ...(commentsData.items || [])]);
-      setWatchCommentsToken(commentsData.nextPageToken || '');
-    } catch (err) {
-      console.warn('Failed to load more comments:', err);
-    }
-  };
 
   // Autoplay next video implementation
   const playNextVideo = () => {
@@ -1029,112 +1008,7 @@ export default function App() {
                   </div>
                 )}
 
-                {/* Comments Thread Section */}
-                <div className="mt-4 flex flex-col gap-4">
-                  <h3 className="text-sm font-bold text-white border-b border-white/5 pb-2 select-none">
-                    Comments ({watchComments.length})
-                  </h3>
 
-                  <div className="flex flex-col gap-4">
-                    {watchComments.map((thread) => {
-                      const comment = thread.snippet?.topLevelComment?.snippet;
-                      const replyComments = thread.replies?.comments || [];
-                      const isExpanded = expandedComments[thread.id];
-                      
-                      if (!comment) return null;
-                      return (
-                        <div key={thread.id} className="flex gap-3 text-sm">
-                          {/* Profile Avatar */}
-                          <img 
-                            src={comment.authorProfileImageUrl || 'https://img.youtube.com'} 
-                            alt="author avatar"
-                            className="w-9 h-9 rounded-full bg-slate-800 border border-white/5 shrink-0 object-cover"
-                            onError={(e) => {
-                              e.target.style.display = 'none';
-                            }}
-                          />
-
-                          <div className="flex flex-col min-w-0 flex-1">
-                            {/* Author row */}
-                            <div className="flex items-center gap-2 select-none">
-                              <span className="font-bold text-white text-xs truncate">
-                                {comment.authorDisplayName}
-                              </span>
-                              <span className="text-[10px] text-slate-500">
-                                {getRelativeTime(comment.publishedAt)}
-                              </span>
-                            </div>
-
-                            {/* Comment text */}
-                            <p className="text-slate-300 text-xs mt-1 whitespace-pre-wrap leading-normal">
-                              {comment.textDisplay}
-                            </p>
-
-                            {/* Like count */}
-                            <div className="flex items-center gap-1.5 text-slate-500 text-[10px] mt-2 select-none">
-                              <ThumbsUp className="w-3.5 h-3.5" />
-                              <span>{comment.likeCount || 0}</span>
-                            </div>
-
-                            {/* Replies expander */}
-                            {replyComments.length > 0 && (
-                              <div className="mt-2.5">
-                                <button
-                                  onClick={() => setExpandedComments(prev => ({ ...prev, [thread.id]: !isExpanded }))}
-                                  className="text-xs font-bold text-rose-400 hover:text-rose-300 flex items-center gap-1 cursor-pointer select-none"
-                                >
-                                  {isExpanded ? (
-                                    <><span>Hide replies</span><ChevronUp className="w-3.5 h-3.5" /></>
-                                  ) : (
-                                    <><span>Show replies ({replyComments.length})</span><ChevronDown className="w-3.5 h-3.5" /></>
-                                  )}
-                                </button>
-
-                                {/* Render replies */}
-                                {isExpanded && (
-                                  <div className="flex flex-col gap-3 mt-3 pl-4 border-l border-white/5">
-                                    {replyComments.map((reply) => (
-                                      <div key={reply.id} className="flex gap-2 text-xs">
-                                        <img 
-                                          src={reply.snippet?.authorProfileImageUrl} 
-                                          alt="avatar"
-                                          className="w-7 h-7 rounded-full bg-slate-800 object-cover shrink-0"
-                                        />
-                                        <div className="flex flex-col min-w-0 flex-1">
-                                          <div className="flex items-center gap-2">
-                                            <span className="font-bold text-white text-[11px] truncate">
-                                              {reply.snippet?.authorDisplayName}
-                                            </span>
-                                            <span className="text-[9px] text-slate-500">
-                                              {getRelativeTime(reply.snippet?.publishedAt)}
-                                            </span>
-                                          </div>
-                                          <p className="text-slate-300 text-xs mt-0.5 leading-normal">
-                                            {reply.snippet?.textDisplay}
-                                          </p>
-                                        </div>
-                                      </div>
-                                    ))}
-                                  </div>
-                                )}
-                              </div>
-                            )}
-                          </div>
-                        </div>
-                      );
-                    })}
-
-                    {/* Load more comments button */}
-                    {watchCommentsToken && (
-                      <button
-                        onClick={loadMoreComments}
-                        className="text-xs font-bold text-slate-400 hover:text-white cursor-pointer self-center py-2"
-                      >
-                        Load More Comments
-                      </button>
-                    )}
-                  </div>
-                </div>
               </div>
 
               {/* Right Column: Recommended Sidebar list */}
