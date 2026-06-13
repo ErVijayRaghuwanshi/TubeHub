@@ -185,6 +185,9 @@ export function useYoutubeConverter() {
 
     setSelectedFormat(format);
     setProgress(0);
+    setDownloadUrl('');
+    setIsSavedToBrowser(false);
+    setSaveError('');
     setStatus('converting');
 
     try {

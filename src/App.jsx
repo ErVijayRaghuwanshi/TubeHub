@@ -932,7 +932,7 @@ export default function App() {
                               const token = e.target.value;
                               const matches = [...videoFormats, ...audioFormats];
                               const found = matches.find(f => f.token === token);
-                              if (found) handleConvert(watchDetails.id).then(() => handleStartConversion(found));
+                              if (found) handleStartConversion(found);
                             }}
                             className="bg-transparent text-xs font-semibold text-slate-200 py-1 focus:outline-none cursor-pointer"
                           >
