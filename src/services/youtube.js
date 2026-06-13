@@ -20,10 +20,15 @@ const getApiHeaders = () => {
  * @param {string} categoryId Optional category ID filter
  * @returns {Promise<object>} YouTube API videos response
  */
-export async function fetchTrending(pageToken = '', categoryId = '') {
-  let url = `${BASE_URL}/trending?regionCode=US`;
-  if (pageToken) url += `&pageToken=${pageToken}`;
-  if (categoryId) url += `&categoryId=${categoryId}`;
+export async function fetchTrending(pageToken = '', categoryId = '', regionCode = '') {
+  let url = `${BASE_URL}/trending`;
+  const params = [];
+  if (pageToken) params.push(`pageToken=${pageToken}`);
+  if (categoryId) params.push(`categoryId=${categoryId}`);
+  if (regionCode) params.push(`regionCode=${regionCode}`);
+  if (params.length > 0) {
+    url += `?${params.join('&')}`;
+  }
 
   const response = await fetch(url, { headers: getApiHeaders() });
   if (!response.ok) {

@@ -43,6 +43,24 @@ function getYouTubeApiKey(req) {
   return YOUTUBE_API_KEY || req.headers['x-youtube-api-key'] || '';
 }
 
+// Server region geolocation detection (on startup)
+let serverRegion = 'US';
+async function detectRegion() {
+  try {
+    const res = await fetch('https://ipapi.co/json/');
+    if (res.ok) {
+      const data = await res.json();
+      if (data.country_code) {
+        serverRegion = data.country_code;
+        console.log(`Detected server region: ${serverRegion}`);
+      }
+    }
+  } catch (err) {
+    console.warn('Failed to detect region from ipapi, falling back to US:', err.message);
+  }
+}
+detectRegion();
+
 // ----------------------------------------------------
 // YouTube Data API Proxy Endpoints
 // ----------------------------------------------------
@@ -54,7 +72,7 @@ app.get('/api/v5/youtube/trending', async (req, res) => {
     return res.status(400).json({ success: false, message: 'YouTube API Key is required.' });
   }
 
-  const { pageToken = '', regionCode = 'US', categoryId = '' } = req.query;
+  const { pageToken = '', regionCode = serverRegion, categoryId = '' } = req.query;
   let url = `https://www.googleapis.com/youtube/v3/videos?part=snippet,statistics,contentDetails&chart=mostPopular&regionCode=${regionCode}&maxResults=12&key=${apiKey}`;
   if (pageToken) url += `&pageToken=${pageToken}`;
   if (categoryId) url += `&videoCategoryId=${categoryId}`;
