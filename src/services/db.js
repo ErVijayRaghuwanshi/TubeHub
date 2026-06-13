@@ -80,3 +80,50 @@ export async function hasMedia(id) {
   const item = await getMedia(id);
   return item !== null;
 }
+
+/**
+ * Calculates the total size and count of all media blobs stored in IndexedDB.
+ * @returns {Promise<{totalBytes: number, count: number}>}
+ */
+export async function getMediaSizeEstimate() {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction(STORE_NAME, 'readonly');
+    const store = transaction.objectStore(STORE_NAME);
+    let totalBytes = 0;
+    let count = 0;
+    
+    const request = store.openCursor();
+    request.onsuccess = (e) => {
+      const cursor = e.target.result;
+      if (cursor) {
+        const val = cursor.value;
+        if (val instanceof Blob) {
+          totalBytes += val.size;
+          if (!cursor.key.endsWith('-thumbnail')) {
+            count++;
+          }
+        }
+        cursor.continue();
+      } else {
+        resolve({ totalBytes, count });
+      }
+    };
+    request.onerror = (e) => reject(request.error);
+  });
+}
+
+/**
+ * Clears all data inside the media store in IndexedDB.
+ * @returns {Promise<void>}
+ */
+export async function clearAllStorage() {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction(STORE_NAME, 'readwrite');
+    const store = transaction.objectStore(STORE_NAME);
+    const request = store.clear();
+    request.onsuccess = () => resolve();
+    request.onerror = (e) => reject(request.error);
+  });
+}

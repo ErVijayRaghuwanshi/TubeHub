@@ -23,6 +23,9 @@ git_bkp
 *.njsproj
 *.sln
 *.sw?
+# download files except .txt
+downloads/*
+!downloads/*.txt
 
 # Environment files
 .env

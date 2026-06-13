@@ -1,11 +1,11 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { useYoutubeConverter } from './hooks/useYoutubeConverter';
 import { fetchTrending, searchVideos, fetchVideoDetails } from './services/youtube';
-import { getMedia } from './services/db';
+import { getMedia, getMediaSizeEstimate, clearAllStorage } from './services/db';
 import { 
   X, Volume2, Film, PictureInPicture, Play, Pause, Volume1, VolumeX, 
   SkipBack, SkipForward, Maximize, Minimize, Search, Settings, Clock, 
-  Download, ChevronDown, ChevronUp, Menu, Library
+  Download, ChevronDown, ChevronUp, Menu, Library, Database
 } from 'lucide-react';
 
 // Sub-component to render offline thumbnails loaded from IndexedDB
@@ -32,7 +32,7 @@ function OfflineThumbnail({ storageId, fallbackId, className }) {
     };
   }, [storageId]);
 
-  const fallbackUrl = `https://img.youtube.com/vi/${fallbackId}/mqdefault.jpg`;
+  const fallbackUrl = `/api/v5/thumbnail/${fallbackId}`;
   return (
     <img 
       src={src || fallbackUrl} 
@@ -49,22 +49,28 @@ export default function App() {
     progress,
     status,
     audioFormats,
+    setAudioFormats,
     videoFormats,
+    setVideoFormats,
     selectedFormat,
+    pendingAction,
     isSavingToBrowser,
     isSavedToBrowser,
     saveError,
     savingIds,
     handleConvert,
-    handleStartConversion,
+    selectFormat,
     handleDownload,
     handleSaveToBrowser,
     handleDeleteFromBrowser,
     handleSaveHistoryItemToBrowser,
-    downloadUrl,
+    currentVideo,
+    setCurrentVideo,
     clearHistory,
     deleteHistoryItem
   } = useYoutubeConverter();
+
+  const [selectedRegion, setSelectedRegion] = useState(() => localStorage.getItem('yt-region-code') || '');
 
   // Custom Router State: Home, Watch, Library, Settings, History
   const [route, setRoute] = useState(() => {
@@ -141,6 +147,11 @@ export default function App() {
   const [feedError, setFeedError] = useState('');
   const [activeCategory, setActiveCategory] = useState('');
 
+  // Search suggestion autocomplete states
+  const [suggestions, setSuggestions] = useState([]);
+  const [showSuggestions, setShowSuggestions] = useState(false);
+  const [focusedSuggestionIndex, setFocusedSuggestionIndex] = useState(-1);
+
   // Watch page state
   const [watchDetails, setWatchDetails] = useState(null);
   const [watchLoading, setWatchLoading] = useState(false);
@@ -174,7 +185,7 @@ export default function App() {
       }
       
       // Fallback to online thumbnail
-      setPosterUrl(`https://img.youtube.com/vi/${activePlayItem.id}/hqdefault.jpg`);
+      setPosterUrl(`/api/v5/thumbnail/${activePlayItem.id}`);
     }
     
     loadPoster();
@@ -190,14 +201,107 @@ export default function App() {
   const videoRef = useRef(null);
   const videoContainerRef = useRef(null);
   const controlsTimeoutRef = useRef(null);
+  const lastSaveTimeRef = useRef(0);
+  const startedAsUncachedRef = useRef(false);
+  const isFormatSwitchRef = useRef(false);
+  const wasPlayingBeforeSwitchRef = useRef(true);
   const [videoIsPlaying, setVideoIsPlaying] = useState(false);
   const [videoCurrentTime, setVideoCurrentTime] = useState(0);
   const [videoDuration, setVideoDuration] = useState(0);
+  const [serverCacheProgress, setServerCacheProgress] = useState(0);
   const [videoVolume, setVideoVolume] = useState(0.8);
   const [videoIsMuted, setVideoIsMuted] = useState(false);
   const [showVideoControls, setShowVideoControls] = useState(true);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [isDraggingVideoTimeline, setIsDraggingVideoTimeline] = useState(false);
+
+  const saveResumePosition = useCallback((videoId, time) => {
+    try {
+      const stored = localStorage.getItem('tubehub_resume_positions');
+      const positions = stored ? JSON.parse(stored) : {};
+      positions[videoId] = time;
+      const keys = Object.keys(positions);
+      if (keys.length > 150) {
+        delete positions[keys[0]];
+      }
+      localStorage.setItem('tubehub_resume_positions', JSON.stringify(positions));
+    } catch (err) {
+      console.warn('Failed to save resume position:', err);
+    }
+  }, []);
+
+  const clearResumePosition = useCallback((videoId) => {
+    try {
+      const stored = localStorage.getItem('tubehub_resume_positions');
+      if (stored) {
+        const positions = JSON.parse(stored);
+        delete positions[videoId];
+        localStorage.setItem('tubehub_resume_positions', JSON.stringify(positions));
+      }
+    } catch (err) {
+      console.warn('Failed to clear resume position:', err);
+    }
+  }, []);
+
+  // Storage Stats State & Functions
+  const [backendCacheSize, setBackendCacheSize] = useState({ totalBytes: 0, fileCount: 0 });
+  const [browserStorageSize, setBrowserStorageSize] = useState({ totalBytes: 0, count: 0 });
+  const [isPurgingBackend, setIsPurgingBackend] = useState(false);
+  const [isClearingBrowser, setIsClearingBrowser] = useState(false);
+  const [enableBackendCache, setEnableBackendCache] = useState(() => localStorage.getItem('tubehub_enable_backend_cache') === 'true');
+
+  const loadStorageStats = useCallback(async () => {
+    try {
+      const backendRes = await fetch('/api/v5/cache/size');
+      if (backendRes.ok) {
+        const backendData = await backendRes.json();
+        setBackendCacheSize(backendData);
+      }
+      const browserData = await getMediaSizeEstimate();
+      setBrowserStorageSize(browserData);
+    } catch (err) {
+      console.warn('Failed to load storage statistics:', err);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (route.name === 'settings') {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      loadStorageStats();
+    }
+  }, [route.name, loadStorageStats]);
+
+  const handlePurgeBackendCache = async () => {
+    if (!window.confirm("Are you sure you want to delete all cached files from the server? This will not interrupt active downloads.")) return;
+    setIsPurgingBackend(true);
+    try {
+      const response = await fetch('/api/v5/cache', { method: 'DELETE' });
+      if (response.ok) {
+        loadStorageStats();
+      } else {
+        alert("Failed to purge server cache.");
+      }
+    } catch (err) {
+      console.error(err);
+      alert("Error purging server cache.");
+    } finally {
+      setIsPurgingBackend(false);
+    }
+  };
+
+  const handleClearBrowserStorage = async () => {
+    if (!window.confirm("Are you sure you want to delete all media stored offline in this browser? This action is permanent and cannot be undone.")) return;
+    setIsClearingBrowser(true);
+    try {
+      await clearAllStorage();
+      loadStorageStats();
+    } catch (err) {
+      console.error(err);
+      alert("Error clearing browser storage.");
+    } finally {
+      setIsClearingBrowser(false);
+    }
+  };
 
   // Custom Local API Key settings
   const [apiKeyInput, setApiKeyInput] = useState(() => localStorage.getItem('yt-api-key') || '');
@@ -268,7 +372,7 @@ export default function App() {
       if (route.name === 'home' && route.query) {
         data = await searchVideos(route.query, pageToken);
       } else {
-        data = await fetchTrending(pageToken, activeCategory);
+        data = await fetchTrending(pageToken, activeCategory, selectedRegion);
       }
 
       const items = data.items || [];
@@ -284,7 +388,7 @@ export default function App() {
     } finally {
       setFeedLoading(false);
     }
-  }, [route.name, route.query, activeCategory]);
+  }, [route.name, route.query, activeCategory, selectedRegion]);
 
   useEffect(() => {
     if (route.name === 'home') {
@@ -292,6 +396,46 @@ export default function App() {
       loadFeed(true);
     }
   }, [route.name, loadFeed]);
+
+  // Fetch search autocomplete suggestions debounced
+  useEffect(() => {
+    if (!searchQuery.trim()) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setSuggestions([]);
+      return;
+    }
+
+    const timer = setTimeout(async () => {
+      try {
+        const response = await fetch(`/api/v5/youtube/suggest?q=${encodeURIComponent(searchQuery.trim())}`);
+        if (response.ok) {
+          const data = await response.json();
+          if (Array.isArray(data) && Array.isArray(data[1])) {
+            setSuggestions(data[1]);
+          } else if (Array.isArray(data)) {
+            setSuggestions(data);
+          }
+        }
+      } catch (err) {
+        console.warn('Failed to fetch suggestions:', err);
+      }
+    }, 200);
+
+    return () => clearTimeout(timer);
+  }, [searchQuery]);
+
+  // Handle click outside of the search bar to hide suggestions
+  const searchContainerRef = useRef(null);
+
+  useEffect(() => {
+    const handleClickOutside = (event) => {
+      if (searchContainerRef.current && !searchContainerRef.current.contains(event.target)) {
+        setShowSuggestions(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
 
   // Handle watch details and streaming source resolve
   const loadWatchDetails = useCallback(async (videoId) => {
@@ -302,11 +446,33 @@ export default function App() {
     handleConvert(videoId);
 
     try {
+      const histItem = history.find(item => item.id === videoId);
       // 1. Fetch metadata
       const details = await fetchVideoDetails(videoId).catch(() => null);
 
       if (details) {
         setWatchDetails(details);
+      } else {
+        // Fallback to history details or synthesize from cache parameters
+        setWatchDetails({
+          id: videoId,
+          snippet: {
+            title: histItem?.title || `Cached Video (${videoId})`,
+            channelTitle: 'Local TubeHub Cache',
+            description: 'This video is loaded from your local network/server cache.',
+            publishedAt: new Date().toISOString(),
+            thumbnails: {
+              medium: { url: `/api/v5/thumbnail/${videoId}` },
+              high: { url: `/api/v5/thumbnail/${videoId}` }
+            }
+          },
+          statistics: {
+            viewCount: '1'
+          },
+          contentDetails: {
+            duration: histItem?.duration || '0'
+          }
+        });
       }
 
       // 2. Determine if video exists offline in browser IndexedDB
@@ -340,10 +506,14 @@ export default function App() {
         });
       } else {
         console.log('Resolving watch player to privacy-first backend stream proxy.');
+        const lastExt = localStorage.getItem('tubehub_last_ext') || 'mp4';
+        const lastQuality = localStorage.getItem('tubehub_last_quality') || '720';
+        const cacheEnabled = localStorage.getItem('tubehub_enable_backend_cache') === 'true';
         setActivePlayItem({
-          title: details?.snippet?.title || 'Streaming Video',
-          ext: 'mp4',
-          src: `/api/v5/stream/${videoId}`,
+          title: details?.snippet?.title || histItem?.title || 'Streaming Video',
+          ext: lastExt,
+          quality: lastQuality,
+          src: `/api/v5/stream/${videoId}?ext=${lastExt}&quality=${lastQuality}&cache=${cacheEnabled}`,
           id: videoId,
           isOffline: false
         });
@@ -371,6 +541,185 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [route.name, route.videoId]);
 
+  // Poll backend cache status for active video stream (acts as active play heartbeat)
+  useEffect(() => {
+    const cacheEnabled = localStorage.getItem('tubehub_enable_backend_cache') === 'true';
+    if (route.name !== 'watch' || !activePlayItem || activePlayItem.isOffline || !cacheEnabled) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setServerCacheProgress(0);
+      startedAsUncachedRef.current = false;
+      return;
+    }
+
+    let isMounted = true;
+    let pollInterval = null;
+    let hasCheckedInitial = false;
+
+    async function checkStatus() {
+      try {
+        const response = await fetch(`/api/v5/cache/status/${activePlayItem.id}?ext=${activePlayItem.ext}&quality=${activePlayItem.quality}`);
+        if (response.ok && isMounted) {
+          const data = await response.json();
+          setServerCacheProgress(data.progress || 0);
+
+          if (!hasCheckedInitial) {
+            hasCheckedInitial = true;
+            if (!data.isCached && data.progress < 100) {
+              startedAsUncachedRef.current = true;
+            }
+          }
+
+          if (data.isCached || data.progress === 100) {
+            setCurrentVideo(prev => prev ? { ...prev, isCached: true } : null);
+            setAudioFormats(prev => prev.map(f => String(f.quality) === String(activePlayItem.quality) && f.ext === activePlayItem.ext ? { ...f, isCached: true } : f));
+            setVideoFormats(prev => prev.map(f => String(f.quality) === String(activePlayItem.quality) && f.ext === activePlayItem.ext ? { ...f, isCached: true } : f));
+
+            // Force player reload only if it transitioned from uncached to cached during this session
+            if (startedAsUncachedRef.current && videoRef.current) {
+              startedAsUncachedRef.current = false; // Reset to prevent double reload
+              const currentTime = videoRef.current.currentTime;
+              const isPlaying = !videoRef.current.paused;
+              console.log('Backend cache completed. Reloading stream source to switch to high-quality file.');
+              
+              // Save position and play state for the format switch handler
+              saveResumePosition(activePlayItem.id, currentTime);
+              wasPlayingBeforeSwitchRef.current = isPlaying;
+              isFormatSwitchRef.current = true;
+
+              // Append a cache-buster query parameter to force browser to request the cached file
+              setActivePlayItem(prev => {
+                if (!prev) return null;
+                const cleanSrc = prev.src.replace(/[&?]_t=\d+/, '');
+                return {
+                  ...prev,
+                  src: `${cleanSrc}${cleanSrc.includes('?') ? '&' : '?'}_t=${Date.now()}`
+                };
+              });
+            }
+
+            if (pollInterval) clearInterval(pollInterval);
+          }
+        }
+      } catch (err) {
+        console.warn('Failed to fetch cache progress:', err);
+      }
+    }
+
+    // Initial check
+    checkStatus();
+
+    // Poll every 2.5 seconds
+    pollInterval = setInterval(checkStatus, 2500);
+
+    return () => {
+      isMounted = false;
+      if (pollInterval) clearInterval(pollInterval);
+    };
+  }, [route.name, activePlayItem, setCurrentVideo, setAudioFormats, setVideoFormats, saveResumePosition]);
+
+  // Dynamically update stream URL when user changes format/quality selection on watch page
+  useEffect(() => {
+    if (
+      route.name === 'watch' &&
+      selectedFormat &&
+      activePlayItem &&
+      !activePlayItem.isOffline &&
+      activePlayItem.id === route.videoId
+    ) {
+      const cacheEnabled = localStorage.getItem('tubehub_enable_backend_cache') === 'true';
+      const newSrc = `/api/v5/stream/${route.videoId}?ext=${selectedFormat.ext}&quality=${selectedFormat.quality}&cache=${cacheEnabled}`;
+      if (activePlayItem.src !== newSrc) {
+        // eslint-disable-next-line react-hooks/set-state-in-effect
+        setActivePlayItem(prev => {
+          if (!prev) return null;
+          return {
+            ...prev,
+            ext: selectedFormat.ext,
+            quality: selectedFormat.quality,
+            src: newSrc
+          };
+        });
+      }
+    }
+  }, [selectedFormat, route.name, route.videoId, activePlayItem]);
+
+  // Dynamic SEO tag management for the Watch page and defaults fallback
+  useEffect(() => {
+    if (route.name === 'watch' && watchDetails) {
+      const videoTitle = watchDetails.snippet?.title || 'Streaming Video';
+      const titleText = `${videoTitle} - Watch & Convert on TubeHub`;
+      const descText = watchDetails.snippet?.description
+        ? `${watchDetails.snippet.description.substring(0, 150)}... Watch and convert to MP3/MP4 on TubeHub.`
+        : `Watch and convert this video to MP3 or MP4 on TubeHub. High quality downloads and offline browser saving.`;
+      const thumbnailUrl = `/api/v5/thumbnail/${route.videoId}`;
+
+      // Update document title
+      document.title = titleText;
+
+      // Helper to update or create meta tags
+      const updateMetaTag = (attribute, value, content) => {
+        let el = document.querySelector(`meta[${attribute}="${value}"]`);
+        if (!el) {
+          el = document.createElement('meta');
+          el.setAttribute(attribute, value);
+          document.head.appendChild(el);
+        }
+        el.setAttribute('content', content);
+      };
+
+      updateMetaTag('name', 'description', descText);
+      updateMetaTag('property', 'og:title', titleText);
+      updateMetaTag('property', 'og:description', descText);
+      updateMetaTag('property', 'og:image', thumbnailUrl);
+      updateMetaTag('name', 'twitter:title', titleText);
+      updateMetaTag('name', 'twitter:description', descText);
+    } else {
+      // Reset to defaults
+      document.title = 'TubeHub | Premium YouTube to MP3 & MP4 Converter & Media Dashboard';
+      
+      const updateMetaTag = (attribute, value, content) => {
+        const el = document.querySelector(`meta[${attribute}="${value}"]`);
+        if (el) el.setAttribute('content', content);
+      };
+
+      updateMetaTag('name', 'description', 'TubeHub is a fast and secure YouTube to MP3 and MP4 converter. Convert YouTube links to high-quality audio up to 320kbps or video up to 1080p, store media offline in your browser, and play instantly.');
+      updateMetaTag('property', 'og:title', 'TubeHub | Premium YouTube to MP3 & MP4 Converter');
+      updateMetaTag('property', 'og:description', 'Convert YouTube links to high-quality audio & video. Save media offline directly in your browser database and play instantly without server buffering.');
+      updateMetaTag('property', 'og:image', '/favicon.svg');
+      updateMetaTag('name', 'twitter:title', 'TubeHub | YouTube to MP3 & MP4 Converter');
+      updateMetaTag('name', 'twitter:description', 'Extract MP3 and MP4 files from YouTube videos. Store them offline in your browser media dashboard.');
+    }
+  }, [route.name, route.videoId, watchDetails]);
+
+
+  useEffect(() => {
+    if (route.videoId) {
+      lastSaveTimeRef.current = 0;
+    }
+  }, [route.videoId]);
+
+  const handleSearchInputKeyDown = (e) => {
+    if (!suggestions.length || !showSuggestions) return;
+
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      setFocusedSuggestionIndex(prev => (prev + 1) % suggestions.length);
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      setFocusedSuggestionIndex(prev => (prev - 1 + suggestions.length) % suggestions.length);
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      setShowSuggestions(false);
+      setFocusedSuggestionIndex(-1);
+    } else if (e.key === 'Enter' && focusedSuggestionIndex !== -1) {
+      e.preventDefault();
+      const selected = suggestions[focusedSuggestionIndex];
+      setSearchQuery(selected);
+      setShowSuggestions(false);
+      setFocusedSuggestionIndex(-1);
+      navigate('home', { q: selected });
+    }
+  };
 
   // Autoplay next video implementation
   const playNextVideo = () => {
@@ -425,13 +774,60 @@ export default function App() {
 
   const handleVideoTimeUpdate = () => {
     if (!videoRef.current || isDraggingVideoTimeline) return;
-    setVideoCurrentTime(videoRef.current.currentTime);
+    const curTime = videoRef.current.currentTime;
+    setVideoCurrentTime(curTime);
+
+    // Only save resume position if video is loaded and state is ready (readyState >= 1)
+    if (route.videoId && videoRef.current.readyState >= 1) {
+      if (Math.abs(curTime - lastSaveTimeRef.current) > 2) {
+        saveResumePosition(route.videoId, curTime);
+        lastSaveTimeRef.current = curTime;
+      }
+    }
   };
 
   const handleVideoLoadedMetadata = () => {
     if (!videoRef.current) return;
-    setVideoDuration(videoRef.current.duration);
+    let duration = videoRef.current.duration;
+    
+    // Fallback to metadata duration if browser duration is infinite, NaN, or 0
+    if (isNaN(duration) || !isFinite(duration) || duration === 0) {
+      if (currentVideo && currentVideo.duration) {
+        duration = currentVideo.duration;
+      }
+    }
+    
+    setVideoDuration(duration);
     resetControlsTimeout();
+
+    // Load saved resume position
+    if (route.videoId) {
+      try {
+        const stored = localStorage.getItem('tubehub_resume_positions');
+        const positions = stored ? JSON.parse(stored) : {};
+        const savedTime = positions[route.videoId];
+        if (savedTime && savedTime > 1 && savedTime < duration - 5) {
+          videoRef.current.currentTime = savedTime;
+          setVideoCurrentTime(savedTime);
+          lastSaveTimeRef.current = savedTime;
+          console.log(`Resumed video ${route.videoId} at ${savedTime} seconds`);
+        } else {
+          lastSaveTimeRef.current = 0;
+        }
+
+        // Restore play/pause state if this reload is from a format switch
+        if (isFormatSwitchRef.current) {
+          isFormatSwitchRef.current = false;
+          if (wasPlayingBeforeSwitchRef.current) {
+            videoRef.current.play().catch(() => {});
+          } else {
+            videoRef.current.pause();
+          }
+        }
+      } catch (err) {
+        console.warn('Failed to load resume position:', err);
+      }
+    }
   };
 
   const seekVideo = (time) => {
@@ -493,17 +889,107 @@ export default function App() {
 
   const handleVideoEnded = () => {
     setVideoIsPlaying(false);
+    if (route.videoId) {
+      clearResumePosition(route.videoId);
+    }
     if (autoplayEnabled) {
       console.log('Video ended. Autoplaying next video...');
       playNextVideo();
     }
   };
 
+  // YouTube-like keyboard shortcuts implementation
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      // Don't trigger shortcuts if typing in input fields
+      const activeEl = document.activeElement;
+      if (
+        activeEl && 
+        (activeEl.tagName === 'INPUT' || 
+         activeEl.tagName === 'TEXTAREA' || 
+         activeEl.isContentEditable)
+      ) {
+        return;
+      }
+
+      if (route.name !== 'watch' || !videoRef.current) return;
+
+      const key = e.key.toLowerCase();
+      const duration = videoRef.current.duration || 0;
+
+      switch (key) {
+        case ' ':
+        case 'k':
+          e.preventDefault();
+          if (videoRef.current.paused) {
+            videoRef.current.play().catch(() => {});
+          } else {
+            videoRef.current.pause();
+          }
+          resetControlsTimeout();
+          break;
+        case 'j':
+          e.preventDefault();
+          seekVideo(Math.max(videoRef.current.currentTime - 10, 0));
+          break;
+        case 'l':
+          e.preventDefault();
+          seekVideo(Math.min(videoRef.current.currentTime + 10, duration));
+          break;
+        case 'arrowleft':
+          e.preventDefault();
+          seekVideo(Math.max(videoRef.current.currentTime - 5, 0));
+          break;
+        case 'arrowright':
+          e.preventDefault();
+          seekVideo(Math.min(videoRef.current.currentTime + 5, duration));
+          break;
+        case 'arrowup':
+          e.preventDefault();
+          handleVolumeChange(Math.min(videoRef.current.volume + 0.05, 1));
+          break;
+        case 'arrowdown':
+          e.preventDefault();
+          handleVolumeChange(Math.max(videoRef.current.volume - 0.05, 0));
+          break;
+        case 'f':
+          e.preventDefault();
+          toggleFullscreen();
+          break;
+        case 'm':
+          e.preventDefault();
+          toggleMute();
+          break;
+        default:
+          // Check for number keys 0-9
+          if (e.key >= '0' && e.key <= '9' && duration > 0) {
+            e.preventDefault();
+            const percent = parseInt(e.key) / 10;
+            seekVideo(duration * percent);
+          }
+          break;
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [route.name]);
+
   const formatTime = (timeInSeconds) => {
-    if (isNaN(timeInSeconds)) return '0:00';
+    if (isNaN(timeInSeconds) || !isFinite(timeInSeconds)) return '0:00';
     const mins = Math.floor(timeInSeconds / 60);
     const secs = Math.floor(timeInSeconds % 60);
     return `${mins}:${secs.toString().padStart(2, '0')}`;
+  };
+
+  const formatStorageSize = (bytes) => {
+    if (!bytes || bytes === 0) return '0.0 MB';
+    const mb = bytes / (1024 * 1024);
+    if (mb < 1024) {
+      return `${mb.toFixed(1)} MB`;
+    }
+    return `${(mb / 1024).toFixed(2)} GB`;
   };
 
   return (
@@ -528,28 +1014,61 @@ export default function App() {
           </div>
         </div>
 
-        {/* Search Form */}
-        <form 
-          onSubmit={(e) => {
-            e.preventDefault();
-            if (searchQuery.trim()) navigate('home', { q: searchQuery.trim() });
-          }}
-          className="flex items-center w-full max-w-xl bg-[#121212] border border-white/10 rounded-full overflow-hidden shadow-inner focus-within:border-rose-500/50 transition-all"
-        >
-          <input 
-            type="text"
-            placeholder="Search privacy-first TubeHub..."
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            className="flex-1 bg-transparent px-4 py-1.5 text-sm text-slate-100 placeholder:text-slate-500 focus:outline-none"
-          />
-          <button 
-            type="submit"
-            className="px-5 bg-white/5 hover:bg-white/10 border-l border-white/10 text-slate-400 hover:text-white py-1.5 transition-colors cursor-pointer"
+        {/* Search Form Container */}
+        <div ref={searchContainerRef} className="relative flex-1 max-w-xl">
+          <form 
+            onSubmit={(e) => {
+              e.preventDefault();
+              setShowSuggestions(false);
+              setFocusedSuggestionIndex(-1);
+              if (searchQuery.trim()) navigate('home', { q: searchQuery.trim() });
+            }}
+            className="flex items-center w-full bg-[#121212] border border-white/10 rounded-full overflow-hidden shadow-inner focus-within:border-rose-500/50 transition-all"
           >
-            <Search className="w-4 h-4" />
-          </button>
-        </form>
+            <input 
+              type="text"
+              placeholder="Search privacy-first TubeHub..."
+              value={searchQuery}
+              onChange={(e) => {
+                setSearchQuery(e.target.value);
+                setShowSuggestions(true);
+                setFocusedSuggestionIndex(-1);
+              }}
+              onFocus={() => setShowSuggestions(true)}
+              onKeyDown={handleSearchInputKeyDown}
+              className="flex-1 bg-transparent px-4 py-1.5 text-sm text-slate-100 placeholder:text-slate-500 focus:outline-none"
+            />
+            <button 
+              type="submit"
+              className="px-5 bg-white/5 hover:bg-white/10 border-l border-white/10 text-slate-400 hover:text-white py-1.5 transition-colors cursor-pointer"
+            >
+              <Search className="w-4 h-4" />
+            </button>
+          </form>
+
+          {/* Autocomplete Suggestions Dropdown */}
+          {showSuggestions && suggestions.length > 0 && (
+            <div className="absolute top-[calc(100%+6px)] left-0 right-0 bg-[#0f0f0f]/95 backdrop-blur-md border border-white/10 rounded-2xl shadow-xl overflow-hidden z-50 py-2 select-none">
+              {suggestions.map((suggestion, index) => (
+                <div
+                  key={index}
+                  onClick={() => {
+                    setSearchQuery(suggestion);
+                    setShowSuggestions(false);
+                    setFocusedSuggestionIndex(-1);
+                    navigate('home', { q: suggestion });
+                  }}
+                  className={`px-4 py-2 text-sm text-slate-300 hover:text-white hover:bg-white/5 flex items-center gap-2.5 cursor-pointer transition-colors ${
+                    focusedSuggestionIndex === index ? 'bg-white/5 text-white font-semibold' : ''
+                  }`}
+                >
+                  <Search className="w-3.5 h-3.5 text-slate-500 shrink-0" />
+                  <span>{suggestion}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
 
         <div className="flex items-center gap-1.5">
           <button 
@@ -656,7 +1175,7 @@ export default function App() {
                     {/* Thumbnail box */}
                     <div className="relative aspect-video rounded-xl overflow-hidden bg-slate-900 border border-white/5 shadow-md">
                       <img 
-                        src={video.snippet?.thumbnails?.medium?.url || 'https://img.youtube.com/vi/dQw4w9WgXcQ/mqdefault.jpg'} 
+                        src={`/api/v5/thumbnail/${video.id}`} 
                         alt={video.snippet?.title}
                         className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
                         loading="lazy"
@@ -766,6 +1285,25 @@ export default function App() {
                       className="w-full h-full object-contain cursor-pointer"
                     />
 
+                    {/* Media Source Overlay HUD Badge */}
+                    <div 
+                      className={`absolute top-4 right-4 z-20 px-2.5 py-1 rounded-md text-[9px] font-bold tracking-wider border shadow-md backdrop-blur-md transition-opacity duration-300 pointer-events-none select-none ${
+                        showVideoControls ? 'opacity-100' : 'opacity-0'
+                      } ${
+                        activePlayItem?.isOffline
+                          ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
+                          : currentVideo?.isCached
+                            ? 'bg-rose-500/10 text-rose-400 border-rose-500/20'
+                            : 'bg-slate-500/10 text-slate-400 border-white/10'
+                      }`}
+                    >
+                      {activePlayItem?.isOffline
+                        ? 'BROWSER STORAGE'
+                        : currentVideo?.isCached
+                          ? 'BACKEND CACHE'
+                          : 'YOUTUBE SERVER (PROXIED)'}
+                    </div>
+
                     {/* Play/Pause Overlay animation button */}
                     <div 
                       onClick={handleVideoPlayPause}
@@ -810,7 +1348,12 @@ export default function App() {
                           onMouseDown={() => setIsDraggingVideoTimeline(true)}
                           className="flex-1 h-1 bg-white/20 hover:h-1.5 rounded-lg appearance-none cursor-pointer accent-rose-500 focus:outline-none transition-all"
                           style={{
-                            background: `linear-gradient(to right, #f43f5e 0%, #f43f5e ${videoDuration ? (videoCurrentTime / videoDuration) * 100 : 0}%, rgba(255,255,255,0.2) ${videoDuration ? (videoCurrentTime / videoDuration) * 100 : 0}%, rgba(255,255,255,0.2) 100%)`
+                            background: (() => {
+                              const played = videoDuration ? (videoCurrentTime / videoDuration) * 100 : 0;
+                              const cache = (activePlayItem && activePlayItem.isOffline) ? 100 : serverCacheProgress;
+                              const endCache = Math.max(played, cache);
+                              return `linear-gradient(to right, #f43f5e 0%, #f43f5e ${played}%, rgba(244, 63, 94, 0.35) ${played}%, rgba(244, 63, 94, 0.35) ${endCache}%, rgba(255, 255, 255, 0.2) ${endCache}%, rgba(255, 255, 255, 0.2) 100%)`;
+                            })()
                           }}
                         />
                         
@@ -935,6 +1478,7 @@ export default function App() {
                       <div className="flex items-center gap-2">
                         {/* Autoplay toggler */}
                         <button
+                          id="watch-btn-autoplay"
                           onClick={() => setAutoplayEnabled(!autoplayEnabled)}
                           className={`px-3 py-1.5 rounded-full text-xs font-semibold border flex items-center gap-1.5 transition cursor-pointer ${
                             autoplayEnabled 
@@ -945,67 +1489,110 @@ export default function App() {
                           <span>Autoplay</span>
                           <span className="text-[10px] px-1 bg-white/10 rounded">{autoplayEnabled ? 'ON' : 'OFF'}</span>
                         </button>
-
+ 
                         {/* Format selector for offline conversion */}
                         <div className="flex items-center gap-1.5 bg-white/5 border border-white/10 rounded-full px-2 py-0.5">
                           <span className="text-[10px] text-slate-400 pl-1 font-semibold">Format:</span>
                           <select 
+                            id="watch-select-format"
                             value={selectedFormat?.token || ''}
                             onChange={(e) => {
                               const token = e.target.value;
                               const matches = [...videoFormats, ...audioFormats];
                               const found = matches.find(f => f.token === token);
-                              if (found) handleStartConversion(found);
+                              if (found) {
+                                // Save exact current playback position before changing format source
+                                if (videoRef.current && watchDetails) {
+                                  saveResumePosition(watchDetails.id, videoRef.current.currentTime);
+                                  wasPlayingBeforeSwitchRef.current = !videoRef.current.paused;
+                                  isFormatSwitchRef.current = true;
+                                }
+                                selectFormat(found);
+                                localStorage.setItem('tubehub_last_ext', found.ext);
+                                localStorage.setItem('tubehub_last_quality', found.quality);
+                              }
                             }}
                             className="bg-transparent text-xs font-semibold text-slate-200 py-1 focus:outline-none cursor-pointer"
                           >
-                            <option value="" disabled>Select conversion quality...</option>
+                            <option value="" disabled>Select Format...</option>
                             <optgroup label="Video (MP4)">
                               {videoFormats.map((f) => {
-                                const isCached = history.some(item => item.id === watchDetails.id && item.ext === f.ext && item.quality === f.quality && item.savedInBrowser);
+                                const isSaved = history.some(item => item.id === watchDetails.id && item.ext === f.ext && item.quality === f.quality && item.savedInBrowser);
+                                const isCachedOnServer = f.isCached;
                                 return (
                                   <option key={f.token} value={f.token}>
-                                    {f.quality}p (.mp4){isCached ? ' (Saved Offline)' : ''}
+                                    {f.quality}p (.mp4){isSaved ? ' (Saved Offline)' : (isCachedOnServer ? ' (Cached)' : '')}
                                   </option>
                                 );
                               })}
                             </optgroup>
                             <optgroup label="Audio (MP3)">
                               {audioFormats.map((f) => {
-                                const isCached = history.some(item => item.id === watchDetails.id && item.ext === f.ext && item.quality === f.quality && item.savedInBrowser);
+                                const isSaved = history.some(item => item.id === watchDetails.id && item.ext === f.ext && item.quality === f.quality && item.savedInBrowser);
+                                const isCachedOnServer = f.isCached;
                                 return (
                                   <option key={f.token} value={f.token}>
-                                    {f.quality}kbps (.mp3){isCached ? ' (Saved Offline)' : ''}
+                                    {f.quality}kbps (.mp3){isSaved ? ' (Saved Offline)' : (isCachedOnServer ? ' (Cached)' : '')}
                                   </option>
                                 );
                               })}
                             </optgroup>
                           </select>
                         </div>
-
+ 
                         {/* Save to Browser Offline Button */}
                         <button
-                          onClick={handleSaveToBrowser}
-                          disabled={!selectedFormat || !downloadUrl || isSavingToBrowser || isSavedToBrowser}
-                          className={`p-2 rounded-full transition border ${
+                          id="watch-btn-save-offline"
+                          onClick={() => handleSaveToBrowser()}
+                          disabled={!selectedFormat || isSavingToBrowser || (status === 'converting' && pendingAction === 'save') || isSavedToBrowser}
+                          className={`p-2 rounded-full transition border relative flex items-center justify-center ${
                             isSavedToBrowser 
                               ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-400 cursor-default' 
-                              : !selectedFormat || !downloadUrl
+                              : !selectedFormat
                                 ? 'opacity-40 border-white/5 text-slate-500 cursor-not-allowed'
-                                : 'bg-white/5 border-white/10 text-slate-300 hover:text-white active:scale-95 cursor-pointer'
+                                : (isSavingToBrowser || (status === 'converting' && pendingAction === 'save'))
+                                  ? 'bg-white/5 border-white/5 text-slate-400 cursor-wait'
+                                  : 'bg-white/5 border-white/10 text-slate-300 hover:text-white active:scale-95 cursor-pointer'
                           }`}
                           title={
                             isSavedToBrowser 
                               ? "Saved to browser offline library" 
                               : !selectedFormat 
-                                ? "Select a format quality first to enable offline saving" 
-                                : !downloadUrl 
-                                  ? "Waiting for conversion to complete..." 
-                                  : "Save offline to browser storage"
+                                ? "Select a format first to enable offline saving" 
+                                : (isSavingToBrowser || (status === 'converting' && pendingAction === 'save'))
+                                  ? `Converting & saving in background (${progress}%)...` 
+                                  : "Save offline to browser storage (will convert first if needed)"
                           }
                         >
-                          {isSavingToBrowser ? (
-                            <div className="w-4.5 h-4.5 border-2 border-slate-300 border-t-transparent rounded-full animate-spin" />
+                          {(isSavingToBrowser || (status === 'converting' && pendingAction === 'save')) ? (
+                            <div className="relative w-4.5 h-4.5 flex items-center justify-center">
+                              <svg className={`absolute inset-0 w-full h-full transform -rotate-90 ${isSavingToBrowser ? 'animate-spin' : ''}`} viewBox="0 0 36 36">
+                                <circle
+                                  cx="18"
+                                  cy="18"
+                                  r="16"
+                                  fill="none"
+                                  className="stroke-white/10"
+                                  strokeWidth="3.5"
+                                />
+                                <circle
+                                  cx="18"
+                                  cy="18"
+                                  r="16"
+                                  fill="none"
+                                  className="stroke-rose-500 transition-all duration-300"
+                                  strokeWidth="3.5"
+                                  strokeDasharray="100.5"
+                                  strokeDashoffset={isSavingToBrowser ? 30 : (100.5 - (progress || 0))}
+                                  strokeLinecap="round"
+                                />
+                              </svg>
+                              {(status === 'converting' && pendingAction === 'save') && (
+                                <span className="text-[7.5px] font-bold font-mono text-rose-400 absolute select-none">
+                                  {progress}
+                                </span>
+                              )}
+                            </div>
                           ) : (
                             <Library className="w-4.5 h-4.5" />
                           )}
@@ -1013,45 +1600,64 @@ export default function App() {
                         
                         {/* Download to File System Button */}
                         <button
-                          onClick={handleDownload}
-                          disabled={!selectedFormat || !downloadUrl}
-                          className={`p-2 rounded-full transition border ${
-                            !selectedFormat || !downloadUrl
+                          id="watch-btn-download"
+                          onClick={() => handleDownload()}
+                          disabled={!selectedFormat || (status === 'converting' && pendingAction === 'download')}
+                          className={`p-2 rounded-full transition border relative flex items-center justify-center ${
+                            !selectedFormat 
                               ? 'opacity-40 border-white/5 text-slate-500 cursor-not-allowed'
-                              : 'bg-rose-600 hover:bg-rose-700 text-white active:scale-95 cursor-pointer border-rose-500/20'
+                              : (status === 'converting' && pendingAction === 'download')
+                                ? 'bg-white/5 border-white/5 text-slate-400 cursor-wait'
+                                : 'bg-rose-600 hover:bg-rose-700 text-white active:scale-95 cursor-pointer border-rose-500/20'
                           }`}
                           title={
                             !selectedFormat 
-                              ? "Select a format quality first to enable downloading" 
-                              : !downloadUrl 
-                                ? "Waiting for conversion to complete..." 
-                                : "Download file to computer"
+                              ? "Select a format first to enable downloading" 
+                              : (status === 'converting' && pendingAction === 'download')
+                                ? `Converting & downloading in background (${progress}%)...` 
+                                : "Download file to computer (will convert first if needed)"
                           }
                         >
-                          <Download className="w-4.5 h-4.5" />
+                          {(status === 'converting' && pendingAction === 'download') ? (
+                            <div className="relative w-4.5 h-4.5 flex items-center justify-center">
+                              <svg className="absolute inset-0 w-full h-full transform -rotate-90" viewBox="0 0 36 36">
+                                <circle
+                                  cx="18"
+                                  cy="18"
+                                  r="16"
+                                  fill="none"
+                                  className="stroke-white/10"
+                                  strokeWidth="3.5"
+                                />
+                                <circle
+                                  cx="18"
+                                  cy="18"
+                                  r="16"
+                                  fill="none"
+                                  className="stroke-rose-500 transition-all duration-300"
+                                  strokeWidth="3.5"
+                                  strokeDasharray="100.5"
+                                  strokeDashoffset={100.5 - (progress || 0)}
+                                  strokeLinecap="round"
+                                />
+                              </svg>
+                              <span className="text-[7.5px] font-bold font-mono text-rose-400 absolute select-none">
+                                {progress}
+                              </span>
+                            </div>
+                          ) : (
+                            <Download className="w-4.5 h-4.5" />
+                          )}
                         </button>
                       </div>
                     </div>
-
-                    {/* Progress feedback */}
-                    {status === 'converting' && (
-                      <div className="p-3 bg-white/5 rounded-xl border border-white/10 flex items-center justify-between gap-4">
-                        <div className="flex-1 flex flex-col gap-1">
-                          <span className="text-xs text-slate-400 font-semibold">Background conversion running...</span>
-                          <div className="h-1.5 w-full bg-white/10 rounded-full overflow-hidden">
-                            <div className="bg-rose-500 h-full transition-all duration-300" style={{ width: `${progress}%` }} />
-                          </div>
-                        </div>
-                        <span className="text-xs font-bold font-mono text-rose-400">{progress}%</span>
-                      </div>
-                    )}
-
+ 
                     {saveError && (
                       <div className="p-3 bg-rose-500/15 border border-rose-500/20 rounded-xl text-xs text-rose-400">
                         {saveError}
                       </div>
                     )}
-
+ 
                     {/* Collapsible description box */}
                     <div className="bg-white/5 rounded-2xl p-4 flex flex-col border border-white/5">
                       <div className="flex items-center gap-3 text-xs font-semibold text-slate-300 select-none">
@@ -1065,8 +1671,9 @@ export default function App() {
                       }`}>
                         {watchDetails.snippet?.description}
                       </div>
-
+ 
                       <button
+                        id="watch-btn-expand-description"
                         onClick={() => setDescExpanded(!descExpanded)}
                         className="text-xs font-bold text-slate-300 hover:text-white mt-2 flex items-center gap-1 self-start cursor-pointer hover:underline"
                       >
@@ -1089,41 +1696,59 @@ export default function App() {
                   Recommended Videos
                 </h3>
                 <div className="flex flex-col gap-3">
-                  {activePlayItem?.isOffline && history.filter(item => item.savedInBrowser && item.id !== route.videoId).length > 0 ? (
-                    history.filter(item => item.savedInBrowser && item.id !== route.videoId).slice(0, 10).map((item) => {
-                      const storageId = `${item.id}-${item.quality}-${item.ext}`;
-                      return (
-                        <div 
-                          key={storageId} 
-                          onClick={() => navigate('watch', { v: item.id })}
-                          className="flex gap-2.5 group cursor-pointer"
-                        >
-                          <div className="relative w-40 aspect-video rounded-lg overflow-hidden bg-slate-900 border border-white/5 shrink-0">
-                            <OfflineThumbnail 
-                              storageId={storageId} 
-                              fallbackId={item.id} 
-                              className="w-full h-full object-cover group-hover:scale-105 transition duration-200"
-                            />
-                            {item.duration && (
-                              <div className="absolute bottom-1 right-1 bg-black/85 text-[9px] font-bold text-white px-1.5 py-0.5 rounded font-mono">
-                                {formatTime(item.duration)}
-                              </div>
-                            )}
+                  {(() => {
+                    const offlineRecs = history.filter(item => 
+                      item.id !== route.videoId && 
+                      (item.savedInBrowser || item.downloadUrl || (item.ext && item.quality))
+                    );
+                    const showOfflineRecs = (activePlayItem?.isOffline || currentVideo?.isCached || !watchDetails) && offlineRecs.length > 0;
+
+                    if (showOfflineRecs) {
+                      return offlineRecs.slice(0, 10).map((item) => {
+                        const storageId = `${item.id}-${item.quality}-${item.ext}`;
+                        const isOfflineSaved = item.savedInBrowser;
+                        return (
+                          <div 
+                            key={storageId} 
+                            onClick={() => navigate('watch', { v: item.id })}
+                            className="flex gap-2.5 group cursor-pointer"
+                          >
+                            <div className="relative w-40 aspect-video rounded-lg overflow-hidden bg-slate-900 border border-white/5 shrink-0">
+                              {isOfflineSaved ? (
+                                <OfflineThumbnail 
+                                  storageId={storageId} 
+                                  fallbackId={item.id} 
+                                  className="w-full h-full object-cover group-hover:scale-105 transition duration-200"
+                                />
+                              ) : (
+                                <img 
+                                  src={`/api/v5/thumbnail/${item.id}`}
+                                  alt={item.title}
+                                  className="w-full h-full object-cover group-hover:scale-105 transition duration-200"
+                                  loading="lazy"
+                                />
+                              )}
+                              {item.duration && (
+                                <div className="absolute bottom-1 right-1 bg-black/85 text-[9px] font-bold text-white px-1.5 py-0.5 rounded font-mono">
+                                  {isNaN(item.duration) ? item.duration : formatTime(item.duration)}
+                                </div>
+                              )}
+                            </div>
+                            
+                            <div className="flex flex-col min-w-0">
+                              <span className="text-xs font-bold text-white leading-tight line-clamp-2 group-hover:text-rose-400 transition" title={item.title}>
+                                {item.title}
+                              </span>
+                              <span className="text-[10px] text-slate-400 mt-1 truncate">
+                                {isOfflineSaved ? 'Offline Library' : 'Backend Cache'} • {item.quality || '720'}{item.ext === 'mp3' ? 'kbps' : 'p'}
+                              </span>
+                            </div>
                           </div>
-                          
-                          <div className="flex flex-col min-w-0">
-                            <span className="text-xs font-bold text-white leading-tight line-clamp-2 group-hover:text-rose-400 transition" title={item.title}>
-                              {item.title}
-                            </span>
-                            <span className="text-[10px] text-slate-400 mt-1 truncate">
-                              Offline Video • {item.quality}{item.ext === 'mp3' ? 'kbps' : 'p'}
-                            </span>
-                          </div>
-                        </div>
-                      );
-                    })
-                  ) : (
-                    feedVideos.filter(v => v.id !== route.videoId).slice(0, 10).map((video) => (
+                        );
+                      });
+                    }
+
+                    return feedVideos.filter(v => v.id !== route.videoId).slice(0, 10).map((video) => (
                       <div 
                         key={video.id} 
                         onClick={() => navigate('watch', { v: video.id })}
@@ -1131,7 +1756,7 @@ export default function App() {
                       >
                         <div className="relative w-40 aspect-video rounded-lg overflow-hidden bg-slate-900 border border-white/5 shrink-0">
                           <img 
-                            src={video.snippet?.thumbnails?.medium?.url || 'https://img.youtube.com/vi/dQw4w9WgXcQ/mqdefault.jpg'} 
+                            src={`/api/v5/thumbnail/${video.id}`} 
                             alt={video.snippet?.title}
                             className="w-full h-full object-cover group-hover:scale-105 transition duration-200"
                             loading="lazy"
@@ -1157,8 +1782,8 @@ export default function App() {
                           </div>
                         </div>
                       </div>
-                    ))
-                  )}
+                    ));
+                  })()}
                 </div>
               </div>
 
@@ -1264,7 +1889,7 @@ export default function App() {
               <div className="flex items-center justify-between border-b border-white/5 pb-2 select-none">
                 <h1 className="text-lg font-bold text-white flex items-center gap-2">
                   <Clock className="w-5 h-5 text-rose-500" />
-                  <span>Conversion & Watch History</span>
+                  <span>History</span>
                 </h1>
                 
                 {history.length > 0 && (
@@ -1285,11 +1910,12 @@ export default function App() {
               ) : (
                 <div className="flex flex-col gap-3.5 mt-2 max-w-4xl">
                   {history.map((item) => {
-                    const storageId = `${item.id}-${item.quality}-${item.ext}`;
-                    const isSaving = savingIds.includes(storageId);
+                    const itemKey = item.ext ? `${item.id}-${item.quality}-${item.ext}` : item.id;
+                    const storageId = item.ext ? `${item.id}-${item.quality}-${item.ext}` : '';
+                    const isSaving = storageId ? savingIds.includes(storageId) : false;
                     return (
                       <div 
-                        key={storageId}
+                        key={itemKey}
                         className="bg-white/5 border border-white/5 hover:border-white/10 rounded-2xl p-4 flex gap-4 items-center justify-between"
                       >
                         {/* Title and metadata */}
@@ -1314,7 +1940,15 @@ export default function App() {
                               {item.title}
                             </h3>
                             <span className="text-[10px] text-slate-500 mt-1 select-none">
-                              {item.quality}{item.ext === 'mp3' ? 'kbps' : 'p'} • {item.ext.toUpperCase()} • {item.downloadedAt}
+                              {item.ext ? (
+                                <>
+                                  {item.quality}{item.ext === 'mp3' ? 'kbps' : 'p'} • {item.ext.toUpperCase()} 
+                                  {item.downloadedAt && ` • Saved ${item.downloadedAt}`}
+                                  {item.watchedAt && ` • Watched ${item.watchedAt}`}
+                                </>
+                              ) : (
+                                <>Watched {item.watchedAt}</>
+                              )}
                             </span>
                           </div>
                         </div>
@@ -1325,7 +1959,7 @@ export default function App() {
                             <div className="px-2.5 py-1 bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 rounded-full text-[10px] font-extrabold select-none">
                               OFFLINE
                             </div>
-                          ) : (
+                          ) : item.ext ? (
                             <button
                               onClick={() => handleSaveHistoryItemToBrowser(item)}
                               disabled={isSaving}
@@ -1333,7 +1967,7 @@ export default function App() {
                             >
                               {isSaving ? 'Saving...' : 'Save Offline'}
                             </button>
-                          )}
+                          ) : null}
 
                           <button
                             onClick={() => deleteHistoryItem(item)}
@@ -1397,6 +2031,114 @@ export default function App() {
                   </button>
                 )}
               </form>
+
+              {/* Default Region Selector */}
+              <div className="bg-white/5 p-6 rounded-2xl border border-white/5 flex flex-col gap-4">
+                <div className="flex flex-col gap-1.5 select-none">
+                  <h3 className="text-sm font-bold text-white">Default YouTube Region</h3>
+                  <p className="text-xs text-slate-400 leading-normal">
+                    Select the region code to fetch trending and category feeds for. 
+                    If set to "Server Default", it will auto-detect your region based on the server IP.
+                  </p>
+                </div>
+
+                <div className="flex gap-2 mt-2">
+                  <select
+                    id="yt-region-selector"
+                    value={selectedRegion}
+                    onChange={(e) => {
+                      const region = e.target.value;
+                      setSelectedRegion(region);
+                      localStorage.setItem('yt-region-code', region);
+                    }}
+                    className="flex-1 bg-slate-900 border border-white/10 rounded-xl px-4 py-2 text-sm text-slate-100 focus:outline-none focus:border-rose-500/50 cursor-pointer"
+                  >
+                    <option value="">Server Default (Geolocated)</option>
+                    <option value="US">United States (US)</option>
+                    <option value="IN">India (IN)</option>
+                    <option value="GB">United Kingdom (GB)</option>
+                    <option value="CA">Canada (CA)</option>
+                    <option value="AU">Australia (AU)</option>
+                    <option value="DE">Germany (DE)</option>
+                    <option value="FR">France (FR)</option>
+                    <option value="JP">Japan (JP)</option>
+                    <option value="BR">Brazil (BR)</option>
+                    <option value="ZA">South Africa (ZA)</option>
+                  </select>
+                </div>
+              </div>
+
+              {/* Storage & Media Cache Manager */}
+              <div className="bg-white/5 p-6 rounded-2xl border border-white/5 flex flex-col gap-5">
+                <div className="flex flex-col gap-1.5 select-none">
+                  <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                    <Database className="w-4.5 h-4.5 text-rose-500" />
+                    <span>Storage & Media Cache Manager</span>
+                  </h3>
+                  <p className="text-xs text-slate-400 leading-normal">
+                    Monitor and manage your bandwidth saving backend disk caches and sandboxed offline database storage.
+                  </p>
+                </div>
+
+                {/* Cache Toggle switch */}
+                <div className="flex items-center justify-between p-4 bg-slate-900/40 border border-white/5 rounded-xl select-none">
+                  <div className="flex flex-col gap-1 pr-4">
+                    <span className="text-xs font-bold text-white">Enable Backend Disk Caching</span>
+                    <span className="text-[10px] text-slate-400 leading-normal">
+                      Automatically cache streamed videos on the server disk to save data on future plays. If disabled, videos are streamed live without caching.
+                    </span>
+                  </div>
+                  <label className="relative inline-flex items-center cursor-pointer select-none">
+                    <input 
+                      type="checkbox" 
+                      checked={enableBackendCache}
+                      onChange={(e) => {
+                        const checked = e.target.checked;
+                        setEnableBackendCache(checked);
+                        localStorage.setItem('tubehub_enable_backend_cache', checked ? 'true' : 'false');
+                      }}
+                      className="sr-only peer"
+                    />
+                    <div className="w-11 h-6 bg-slate-800 rounded-full peer peer-focus:ring-2 peer-focus:ring-rose-500/25 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-slate-400 peer-checked:after:bg-rose-500 after:border-slate-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-rose-950/40 peer-checked:border peer-checked:border-rose-500/35 border border-white/5"></div>
+                  </label>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mt-1">
+                  {/* Backend Cache Card */}
+                  <div className="bg-slate-900/40 border border-white/5 rounded-xl p-4 flex flex-col justify-between gap-3">
+                    <div className="flex flex-col gap-1 select-none">
+                      <span className="text-[10px] font-extrabold tracking-wider text-slate-500 uppercase">Server-Side Cache</span>
+                      <span className="text-xl font-black text-white">{formatStorageSize(backendCacheSize.totalBytes)}</span>
+                      <span className="text-xs text-slate-400">{backendCacheSize.fileCount} cached media / thumbnail files</span>
+                    </div>
+                    <button
+                      type="button"
+                      disabled={isPurgingBackend || backendCacheSize.fileCount === 0}
+                      onClick={handlePurgeBackendCache}
+                      className="w-full py-2 bg-white/5 hover:bg-rose-950/30 hover:text-rose-400 hover:border-rose-500/30 text-slate-300 disabled:opacity-30 disabled:hover:bg-white/5 disabled:hover:text-slate-300 disabled:hover:border-white/10 rounded-xl text-xs font-bold border border-white/10 transition cursor-pointer select-none"
+                    >
+                      {isPurgingBackend ? 'Purging Cache...' : 'Purge Backend Cache'}
+                    </button>
+                  </div>
+
+                  {/* Browser Offline Library Card */}
+                  <div className="bg-slate-900/40 border border-white/5 rounded-xl p-4 flex flex-col justify-between gap-3">
+                    <div className="flex flex-col gap-1 select-none">
+                      <span className="text-[10px] font-extrabold tracking-wider text-slate-500 uppercase">Browser Offline Library</span>
+                      <span className="text-xl font-black text-white">{formatStorageSize(browserStorageSize.totalBytes)}</span>
+                      <span className="text-xs text-slate-400">{browserStorageSize.count} offline saved media items</span>
+                    </div>
+                    <button
+                      type="button"
+                      disabled={isClearingBrowser || browserStorageSize.count === 0}
+                      onClick={handleClearBrowserStorage}
+                      className="w-full py-2 bg-white/5 hover:bg-rose-950/30 hover:text-rose-400 hover:border-rose-500/30 text-slate-300 disabled:opacity-30 disabled:hover:bg-white/5 disabled:hover:text-slate-300 disabled:hover:border-white/10 rounded-xl text-xs font-bold border border-white/10 transition cursor-pointer select-none"
+                    >
+                      {isClearingBrowser ? 'Clearing Storage...' : 'Clear Offline Library'}
+                    </button>
+                  </div>
+                </div>
+              </div>
 
               {/* Developer note */}
               <div className="bg-white/5 p-6 rounded-2xl border border-white/5 flex flex-col gap-2">

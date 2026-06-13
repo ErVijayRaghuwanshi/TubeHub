@@ -124,7 +124,7 @@ export default function ConversionHistory({
             const isVideo = ext === 'mp4';
             const itemKey = `${item.id}-${quality}-${ext}`;
             const isSaving = savingIds.includes(itemKey);
-            const thumbnailUrl = `https://img.youtube.com/vi/${item.id}/mqdefault.jpg`;
+            const thumbnailUrl = `/api/v5/thumbnail/${item.id}`;
             
             const progress = playbackProgress?.[itemKey];
             const progressPercent = progress ? progress.percentage : 0;

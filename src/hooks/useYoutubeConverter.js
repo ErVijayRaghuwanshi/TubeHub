@@ -51,6 +51,7 @@ export function useYoutubeConverter() {
   const [audioFormats, setAudioFormats] = useState([]);
   const [videoFormats, setVideoFormats] = useState([]);
   const [selectedFormat, setSelectedFormat] = useState(null);
+  const [pendingAction, setPendingAction] = useState(null); // null, 'save', 'download'
 
   // Local Browser Storage States
   const [isSavingToBrowser, setIsSavingToBrowser] = useState(false);
@@ -107,6 +108,22 @@ export function useYoutubeConverter() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Check if current selectedFormat is already saved in IndexedDB
+  useEffect(() => {
+    async function checkSaved() {
+      if (currentVideo && selectedFormat) {
+        const storageId = `${currentVideo.id}-${selectedFormat.quality}-${selectedFormat.ext}`;
+        const saved = await hasMedia(storageId).catch(() => false);
+        setIsSavedToBrowser(saved);
+      } else {
+        setIsSavedToBrowser(false);
+      }
+    }
+    checkSaved();
+  }, [currentVideo, selectedFormat, history]);
+
+  // Handle pending action when conversion finishes will be defined below handleSaveToBrowser
+
   /**
    * Phase 1: Validates YouTube URL and fetches video info metadata (formats & thumbnails)
    */
@@ -128,8 +145,6 @@ export function useYoutubeConverter() {
       return;
     }
 
-
-
     // Reset states for a new parsing run
     setErrorMsg('');
     setProgress(0);
@@ -138,6 +153,7 @@ export function useYoutubeConverter() {
     setAudioFormats([]);
     setVideoFormats([]);
     setSelectedFormat(null);
+    setPendingAction(null);
     setIsSavedToBrowser(false);
     setIsSavingToBrowser(false);
     setSaveError('');
@@ -150,11 +166,13 @@ export function useYoutubeConverter() {
       // Fetch info and formats
       const infoData = await fetchVideoInfo(videoId);
       
+      const histItem = history.find(item => item.id === infoData.videoId);
       const videoData = {
         id: infoData.videoId,
-        title: infoData.title || 'YouTube Video',
-        duration: infoData.duration || 'Unknown',
-        thumbnail: `https://img.youtube.com/vi/${infoData.videoId}/hqdefault.jpg`
+        title: (infoData.title && infoData.title.startsWith('Cached Video (') && histItem) ? histItem.title : (infoData.title || 'YouTube Video'),
+        duration: (infoData.duration === 0 && histItem) ? histItem.duration : (infoData.duration || 'Unknown'),
+        thumbnail: `/api/v5/thumbnail/${infoData.videoId}`,
+        isCached: infoData.isCached
       };
       
       setCurrentVideo(videoData);
@@ -168,6 +186,50 @@ export function useYoutubeConverter() {
 
       setAudioFormats(audios);
       setVideoFormats(videos);
+      
+      // Auto-select last used format preference if available
+      const lastExt = localStorage.getItem('tubehub_last_ext');
+      const lastQuality = localStorage.getItem('tubehub_last_quality');
+      let defaultFormat = null;
+      if (lastExt && lastQuality) {
+        const matches = [...videos, ...audios];
+        defaultFormat = matches.find(f => f.ext === lastExt && String(f.quality) === String(lastQuality));
+      }
+      if (!defaultFormat) {
+        defaultFormat = videos.length > 0 ? videos[0] : (audios.length > 0 ? audios[0] : null);
+      }
+      setSelectedFormat(defaultFormat);
+
+      // Add or update watch history
+      setHistory(prev => {
+        const existingIndex = prev.findIndex(item => item.id === videoData.id);
+        const nowString = new Date().toLocaleDateString([], { month: 'short', day: 'numeric' }) + ' ' + new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        
+        let updatedItem;
+        if (existingIndex !== -1) {
+          const existing = prev[existingIndex];
+          updatedItem = {
+            ...existing,
+            title: videoData.title,
+            duration: videoData.duration,
+            watchedAt: nowString
+          };
+        } else {
+          updatedItem = {
+            id: videoData.id,
+            title: videoData.title,
+            duration: videoData.duration,
+            ext: '',
+            quality: '',
+            downloadedAt: '',
+            downloadUrl: '',
+            savedInBrowser: false,
+            watchedAt: nowString
+          };
+        }
+        const filtered = prev.filter(item => item.id !== videoData.id);
+        return [updatedItem, ...filtered].slice(0, 100);
+      });
       
       // Stop and let user select their format/quality option
       setStatus('parsed');
@@ -232,93 +294,169 @@ export function useYoutubeConverter() {
   };
 
   /**
-   * Phase 3: Handles user download action (adds item to history)
+   * Updates current selected format and resets relevant conversion states
    */
-  const handleDownload = () => {
+  const selectFormat = (format) => {
+    setSelectedFormat(format);
+    setDownloadUrl('');
+    setProgress(0);
+    setStatus('parsed');
+    setPendingAction(null);
+    if (pollIntervalRef.current) {
+      clearInterval(pollIntervalRef.current);
+      pollIntervalRef.current = null;
+    }
+  };
+
+  /**
+   * Phase 3: Handles user download action (adds item to history & triggers browser file download)
+   */
+  const handleDownload = (customUrl) => {
+    const urlToUse = (typeof customUrl === 'string') ? customUrl : downloadUrl;
     if (!currentVideo || !selectedFormat) return;
 
-    // Add to history list if not already present
-    const exists = history.some(item => item.id === currentVideo.id && item.ext === selectedFormat.ext && item.quality === selectedFormat.quality);
-    if (!exists) {
-      const newHistory = [
-        {
-          id: currentVideo.id,
-          title: currentVideo.title,
-          duration: currentVideo.duration,
-          ext: selectedFormat.ext,
-          quality: selectedFormat.quality,
-          downloadedAt: new Date().toLocaleDateString([], { month: 'short', day: 'numeric' }) + ' ' + new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-          downloadUrl: downloadUrl,
-          savedInBrowser: isSavedToBrowser
-        },
-        ...history
-      ].slice(0, 100);
-      
-      setHistory(newHistory);
+    if (urlToUse) {
+      // Trigger download
+      const a = document.createElement('a');
+      a.href = urlToUse;
+      const sanitizedTitle = (currentVideo.title || 'download').replace(/[/?<>\\:*|"]/g, '_');
+      a.download = `${sanitizedTitle}.${selectedFormat.ext}`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+
+      // Update or add download details to the existing history entry (keyed by video ID)
+      setHistory(prev => {
+        const existingIndex = prev.findIndex(item => item.id === currentVideo.id);
+        const nowString = new Date().toLocaleDateString([], { month: 'short', day: 'numeric' }) + ' ' + new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        
+        let updatedItem;
+        if (existingIndex !== -1) {
+          const existing = prev[existingIndex];
+          updatedItem = {
+            ...existing,
+            ext: selectedFormat.ext,
+            quality: selectedFormat.quality,
+            downloadedAt: nowString,
+            downloadUrl: urlToUse,
+            savedInBrowser: isSavedToBrowser
+          };
+        } else {
+          updatedItem = {
+            id: currentVideo.id,
+            title: currentVideo.title,
+            duration: currentVideo.duration,
+            ext: selectedFormat.ext,
+            quality: selectedFormat.quality,
+            downloadedAt: nowString,
+            downloadUrl: urlToUse,
+            savedInBrowser: isSavedToBrowser,
+            watchedAt: ''
+          };
+        }
+        
+        const filtered = prev.filter(item => item.id !== currentVideo.id);
+        return [updatedItem, ...filtered].slice(0, 100);
+      });
+    } else {
+      setPendingAction('download');
+      if (status !== 'converting') {
+        handleStartConversion(selectedFormat);
+      }
     }
   };
 
   /**
    * Phase 4: Saves file locally inside browser storage (IndexedDB)
    */
-  const handleSaveToBrowser = async () => {
-    if (!currentVideo || !selectedFormat || !downloadUrl) return;
+  const handleSaveToBrowser = async (customUrl) => {
+    const urlToUse = (typeof customUrl === 'string') ? customUrl : downloadUrl;
+    if (!currentVideo || !selectedFormat) return;
 
-    setIsSavingToBrowser(true);
-    setSaveError('');
+    if (urlToUse) {
+      setIsSavingToBrowser(true);
+      setSaveError('');
 
-    try {
-      const blob = await fetchBlobWithProxy(downloadUrl);
-      const storageId = `${currentVideo.id}-${selectedFormat.quality}-${selectedFormat.ext}`;
-      await saveMedia(storageId, blob);
-
-      // Also save thumbnail blob offline
       try {
-        const thumbnailUrl = `https://img.youtube.com/vi/${currentVideo.id}/mqdefault.jpg`;
-        const thumbnailBlob = await fetchBlobWithProxy(thumbnailUrl).catch(() => null);
-        if (thumbnailBlob) {
-          await saveMedia(`${storageId}-thumbnail`, thumbnailBlob);
-        }
-      } catch (thumbErr) {
-        console.warn('Failed to save thumbnail offline:', thumbErr);
-      }
+        const blob = await fetchBlobWithProxy(urlToUse);
+        const storageId = `${currentVideo.id}-${selectedFormat.quality}-${selectedFormat.ext}`;
+        await saveMedia(storageId, blob);
 
-      setIsSavedToBrowser(true);
-
-      // Add to history (marking as saved in browser)
-      const exists = history.some(item => item.id === currentVideo.id && item.ext === selectedFormat.ext && item.quality === selectedFormat.quality);
-      
-      if (exists) {
-        setHistory(prev => prev.map(item => {
-          if (item.id === currentVideo.id && item.ext === selectedFormat.ext && item.quality === selectedFormat.quality) {
-            return { ...item, savedInBrowser: true };
+        // Also save thumbnail blob offline
+        try {
+          const thumbnailUrl = `/api/v5/thumbnail/${currentVideo.id}`;
+          const thumbnailBlob = await fetchBlobWithProxy(thumbnailUrl).catch(() => null);
+          if (thumbnailBlob) {
+            await saveMedia(`${storageId}-thumbnail`, thumbnailBlob);
           }
-          return item;
-        }));
-      } else {
-        const newHistory = [
-          {
-            id: currentVideo.id,
-            title: currentVideo.title,
-            duration: currentVideo.duration,
-            ext: selectedFormat.ext,
-            quality: selectedFormat.quality,
-            downloadedAt: new Date().toLocaleDateString([], { month: 'short', day: 'numeric' }) + ' ' + new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-            downloadUrl: downloadUrl,
-            savedInBrowser: true
-          },
-          ...history
-        ].slice(0, 100);
-        setHistory(newHistory);
-      }
+        } catch (thumbErr) {
+          console.warn('Failed to save thumbnail offline:', thumbErr);
+        }
 
-    } catch (err) {
-      console.error(err);
-      setSaveError(err.message || 'Failed to save to browser storage.');
-    } finally {
-      setIsSavingToBrowser(false);
+        setIsSavedToBrowser(true);
+
+        // Update or add save-offline details to history (keyed by video ID)
+        setHistory(prev => {
+          const existingIndex = prev.findIndex(item => item.id === currentVideo.id);
+          const nowString = new Date().toLocaleDateString([], { month: 'short', day: 'numeric' }) + ' ' + new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+          
+          let updatedItem;
+          if (existingIndex !== -1) {
+            const existing = prev[existingIndex];
+            updatedItem = {
+              ...existing,
+              ext: selectedFormat.ext,
+              quality: selectedFormat.quality,
+              downloadedAt: nowString,
+              downloadUrl: urlToUse,
+              savedInBrowser: true
+            };
+          } else {
+            updatedItem = {
+              id: currentVideo.id,
+              title: currentVideo.title,
+              duration: currentVideo.duration,
+              ext: selectedFormat.ext,
+              quality: selectedFormat.quality,
+              downloadedAt: nowString,
+              downloadUrl: urlToUse,
+              savedInBrowser: true,
+              watchedAt: ''
+            };
+          }
+          
+          const filtered = prev.filter(item => item.id !== currentVideo.id);
+          return [updatedItem, ...filtered].slice(0, 100);
+        });
+
+      } catch (err) {
+        console.error(err);
+        setSaveError(err.message || 'Failed to save to browser storage.');
+      } finally {
+        setIsSavingToBrowser(false);
+      }
+    } else {
+      setPendingAction('save');
+      if (status !== 'converting') {
+        handleStartConversion(selectedFormat);
+      }
     }
   };
+
+  // Handle pending action when conversion finishes
+  useEffect(() => {
+    if (status === 'ready' && downloadUrl && pendingAction) {
+      const action = pendingAction;
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setPendingAction(null); // Clear first to avoid duplicate execution
+      if (action === 'save') {
+        handleSaveToBrowser(downloadUrl);
+      } else if (action === 'download') {
+        handleDownload(downloadUrl);
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [status, downloadUrl, pendingAction]);
 
   /**
    * Phase 5: Deletes file from local browser storage
@@ -356,7 +494,7 @@ export function useYoutubeConverter() {
 
       // Also save thumbnail blob offline
       try {
-        const thumbnailUrl = `https://img.youtube.com/vi/${item.id}/mqdefault.jpg`;
+        const thumbnailUrl = `/api/v5/thumbnail/${item.id}`;
         const thumbnailBlob = await fetchBlobWithProxy(thumbnailUrl).catch(() => null);
         if (thumbnailBlob) {
           await saveMedia(`${storageId}-thumbnail`, thumbnailBlob);
@@ -393,7 +531,6 @@ export function useYoutubeConverter() {
       const localUrl = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = localUrl;
-      // Sanitize filename for operating system compatibility
       const sanitizedTitle = (item.title || 'download').replace(/[/?<>\\:*|"]/g, '_');
       a.download = `${sanitizedTitle}.${item.ext}`;
       document.body.appendChild(a);
@@ -415,6 +552,7 @@ export function useYoutubeConverter() {
     setAudioFormats([]);
     setVideoFormats([]);
     setSelectedFormat(null);
+    setPendingAction(null);
     setIsSavedToBrowser(false);
     setIsSavingToBrowser(false);
     setSaveError('');
@@ -437,7 +575,6 @@ export function useYoutubeConverter() {
   };
 
   const clearHistory = async () => {
-    // Optionally delete files from IndexedDB when clearing history
     for (const item of history) {
       if (item.savedInBrowser) {
         const storageId = `${item.id}-${item.quality}-${item.ext}`;
@@ -458,16 +595,21 @@ export function useYoutubeConverter() {
     errorMsg,
     history,
     currentVideo,
+    setCurrentVideo,
     downloadUrl,
     audioFormats,
+    setAudioFormats,
     videoFormats,
+    setVideoFormats,
     selectedFormat,
+    pendingAction,
     isSavingToBrowser,
     isSavedToBrowser,
     saveError,
     savingIds,
     handleConvert,
     handleStartConversion,
+    selectFormat,
     handleDownload,
     handleSaveToBrowser,
     handleDeleteFromBrowser,
