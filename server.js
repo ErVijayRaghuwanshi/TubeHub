@@ -2,9 +2,10 @@ import express from 'express';
 import cors from 'cors';
 import path from 'path';
 import fs from 'fs';
-import { exec } from 'child_process';
+import { exec, spawn } from 'child_process';
 import youtubedl from 'youtube-dl-exec';
 import { fileURLToPath } from 'url';
+import https from 'https';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -29,10 +30,250 @@ exec('ffmpeg -version', (err) => {
   }
 });
 
+// Cache database for active background streams
+const cacheJobs = {};
 // Jobs database
 const jobs = {};
 
-// GET info endpoint
+// YouTube API Key configuration
+const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY || '';
+
+// Helper to get API Key (checks environment variable or request header)
+function getYouTubeApiKey(req) {
+  return YOUTUBE_API_KEY || req.headers['x-youtube-api-key'] || '';
+}
+
+// ----------------------------------------------------
+// YouTube Data API Proxy Endpoints
+// ----------------------------------------------------
+
+// GET trending/popular videos
+app.get('/api/v5/youtube/trending', async (req, res) => {
+  const apiKey = getYouTubeApiKey(req);
+  if (!apiKey) {
+    return res.status(400).json({ success: false, message: 'YouTube API Key is required.' });
+  }
+
+  const { pageToken = '', regionCode = 'US', categoryId = '' } = req.query;
+  let url = `https://www.googleapis.com/youtube/v3/videos?part=snippet,statistics,contentDetails&chart=mostPopular&regionCode=${regionCode}&maxResults=12&key=${apiKey}`;
+  if (pageToken) url += `&pageToken=${pageToken}`;
+  if (categoryId) url += `&videoCategoryId=${categoryId}`;
+
+  try {
+    const response = await fetch(url);
+    if (!response.ok) {
+      throw new Error(`YouTube API returned status ${response.status}`);
+    }
+    const data = await response.json();
+    res.json(data);
+  } catch (err) {
+    console.error('Trending fetch failed:', err);
+    res.status(500).json({ success: false, message: 'Failed to fetch trending videos.' });
+  }
+});
+
+// GET search videos (enriched with duration & stats)
+app.get('/api/v5/youtube/search', async (req, res) => {
+  const apiKey = getYouTubeApiKey(req);
+  if (!apiKey) {
+    return res.status(400).json({ success: false, message: 'YouTube API Key is required.' });
+  }
+
+  const { q, pageToken = '', maxResults = 12 } = req.query;
+  if (!q) {
+    return res.status(400).json({ success: false, message: 'Missing query parameter q.' });
+  }
+
+  try {
+    let searchUrl = `https://www.googleapis.com/youtube/v3/search?part=snippet&q=${encodeURIComponent(q)}&type=video&maxResults=${maxResults}&key=${apiKey}`;
+    if (pageToken) searchUrl += `&pageToken=${pageToken}`;
+
+    const searchRes = await fetch(searchUrl);
+    if (!searchRes.ok) {
+      throw new Error(`YouTube Search API returned status ${searchRes.status}`);
+    }
+    const searchData = await searchRes.json();
+
+    if (!searchData.items || searchData.items.length === 0) {
+      return res.json(searchData);
+    }
+
+    // Enrich search results with video statistics & durations
+    const videoIds = searchData.items.map(item => item.id.videoId).filter(Boolean).join(',');
+    if (videoIds) {
+      const detailsUrl = `https://www.googleapis.com/youtube/v3/videos?part=statistics,contentDetails&id=${videoIds}&key=${apiKey}`;
+      const detailsRes = await fetch(detailsUrl);
+      if (detailsRes.ok) {
+        const detailsData = await detailsRes.json();
+        const detailsMap = {};
+        detailsData.items?.forEach(video => {
+          detailsMap[video.id] = {
+            statistics: video.statistics,
+            contentDetails: video.contentDetails
+          };
+        });
+
+        // Merge details into search items and flatten structure to match trending endpoint format
+        searchData.items = searchData.items.map(item => {
+          const videoId = item.id.videoId;
+          const details = detailsMap[videoId];
+          return {
+            ...item,
+            id: videoId,
+            statistics: details?.statistics,
+            contentDetails: details?.contentDetails
+          };
+        }).filter(item => item.id);
+      }
+    }
+
+    res.json(searchData);
+  } catch (err) {
+    console.error('Search fetch failed:', err);
+    res.status(500).json({ success: false, message: 'Failed to search videos.' });
+  }
+});
+
+// GET single video details
+app.get('/api/v5/youtube/video/:videoId', async (req, res) => {
+  const apiKey = getYouTubeApiKey(req);
+  if (!apiKey) {
+    return res.status(400).json({ success: false, message: 'YouTube API Key is required.' });
+  }
+
+  const { videoId } = req.params;
+  try {
+    const url = `https://www.googleapis.com/youtube/v3/videos?part=snippet,statistics,contentDetails&id=${videoId}&key=${apiKey}`;
+    const response = await fetch(url);
+    if (!response.ok) {
+      throw new Error(`YouTube Video API returned status ${response.status}`);
+    }
+    const data = await response.json();
+    const video = data.items?.[0] || null;
+    if (!video) {
+      return res.status(404).json({ success: false, message: 'Video not found.' });
+    }
+    res.json(video);
+  } catch (err) {
+    console.error('Video details fetch failed:', err);
+    res.status(500).json({ success: false, message: 'Failed to fetch video details.' });
+  }
+});
+
+// GET comment threads for a video
+app.get('/api/v5/youtube/comments/:videoId', async (req, res) => {
+  const apiKey = getYouTubeApiKey(req);
+  if (!apiKey) {
+    return res.status(400).json({ success: false, message: 'YouTube API Key is required.' });
+  }
+
+  const { videoId } = req.params;
+  const { pageToken = '' } = req.query;
+  try {
+    let url = `https://www.googleapis.com/youtube/v3/commentThreads?part=snippet,replies&videoId=${videoId}&maxResults=20&order=relevance&textFormat=plainText&key=${apiKey}`;
+    if (pageToken) url += `&pageToken=${pageToken}`;
+
+    const response = await fetch(url);
+    if (!response.ok) {
+      throw new Error(`YouTube Comments API returned status ${response.status}`);
+    }
+    const data = await response.json();
+    res.json(data);
+  } catch (err) {
+    console.error('Comments fetch failed:', err);
+    res.status(500).json({ success: false, message: 'Failed to fetch comments.' });
+  }
+});
+
+// ----------------------------------------------------
+// Privacy Stream Proxy with Background Caching
+// ----------------------------------------------------
+
+app.get('/api/v5/stream/:videoId', async (req, res) => {
+  const { videoId } = req.params;
+  const cachePath = path.join(DOWNLOADS_DIR, `cache_${videoId}.mp4`);
+
+  try {
+    // 1. If video is already fully cached locally, serve it directly
+    if (fs.existsSync(cachePath) && !cacheJobs[videoId]) {
+      console.log(`Streaming video ${videoId} directly from local backend cache.`);
+      return res.sendFile(cachePath);
+    }
+
+    // 2. If video is not cached and not currently downloading in background, trigger download
+    if (!cacheJobs[videoId] && !fs.existsSync(cachePath)) {
+      console.log(`Stating background cache download for video: ${videoId}`);
+      const flags = {
+        output: cachePath,
+        format: 'best',
+        noCheckCertificates: true,
+        noWarnings: true
+      };
+
+      const child = youtubedl.exec(`https://www.youtube.com/watch?v=${videoId}`, flags);
+      cacheJobs[videoId] = child;
+
+      child.then(() => {
+        delete cacheJobs[videoId];
+        console.log(`Background cache download completed for video: ${videoId}`);
+      }).catch((err) => {
+        delete cacheJobs[videoId];
+        if (fs.existsSync(cachePath)) {
+          try { fs.unlinkSync(cachePath); } catch (e) {}
+        }
+        console.error(`Background cache download failed for video: ${videoId}`, err);
+      });
+    }
+
+    // 3. Simultaneously, proxy the stream from YouTube via HTTPS Range Request proxy
+    const videoUrl = `https://www.youtube.com/watch?v=${videoId}`;
+    const streamUrl = await youtubedl(videoUrl, {
+      getUrl: true,
+      format: 'best',
+      noCheckCertificates: true,
+      noWarnings: true
+    });
+
+    const parsedUrl = new URL(streamUrl);
+    const headers = {};
+    if (req.headers.range) {
+      headers['Range'] = req.headers.range;
+    }
+
+    const options = {
+      method: 'GET',
+      hostname: parsedUrl.hostname,
+      path: parsedUrl.pathname + parsedUrl.search,
+      headers: headers
+    };
+
+    const proxyReq = https.request(options, (proxyRes) => {
+      res.writeHead(proxyRes.statusCode, proxyRes.headers);
+      proxyRes.pipe(res);
+    });
+
+    proxyReq.on('error', (err) => {
+      console.error(`Stream proxy failed for video ${videoId}:`, err);
+      if (!res.headersSent) {
+        res.status(500).send('Streaming failed.');
+      }
+    });
+
+    proxyReq.end();
+
+  } catch (error) {
+    console.error(`Failed to handle stream request for video ${videoId}:`, error);
+    if (!res.headersSent) {
+      res.status(500).send('Could not fetch video stream.');
+    }
+  }
+});
+
+// ----------------------------------------------------
+// Original Converter & Download Endpoints
+// ----------------------------------------------------
+
+// GET info endpoint (for legacy support or direct checks)
 app.get('/api/v5/info/:videoId', async (req, res) => {
   const { videoId } = req.params;
   try {
@@ -46,14 +287,12 @@ app.get('/api/v5/info/:videoId', async (req, res) => {
       preferFreeFormats: true,
     });
     
-    // Group audio formats (we transcode from source to target bitrate)
     const audioFormats = [
       { token: `audio-320-${videoId}`, quality: 320, ext: 'mp3' },
       { token: `audio-256-${videoId}`, quality: 256, ext: 'mp3' },
       { token: `audio-128-${videoId}`, quality: 128, ext: 'mp3' }
     ];
 
-    // Group video formats
     const formats = output.formats || [];
     const videoFormats = [];
     
@@ -65,7 +304,6 @@ app.get('/api/v5/info/:videoId', async (req, res) => {
       }
     });
 
-    // Fallback if no specific heights are resolved
     if (videoFormats.length === 0) {
       const hasMuxed = formats.some(f => f.vcodec !== 'none' && f.acodec !== 'none');
       if (hasMuxed) {
@@ -154,7 +392,7 @@ async function runConversionJob(jobId, videoId, type, quality) {
     const outputPath = path.join(DOWNLOADS_DIR, `${jobId}.${job.ext}`);
     job.filePath = outputPath;
 
-    // Fetch metadata first to extract title
+    // Fetch title info
     try {
       const output = await youtubedl(videoUrl, {
         dumpSingleJson: true,
@@ -163,56 +401,50 @@ async function runConversionJob(jobId, videoId, type, quality) {
       });
       job.title = output.title;
     } catch (e) {
-      console.warn('Metadata fetch failed during job execution, using default video ID:', e);
+      console.warn('Metadata fetch failed during job, using video ID title:', e);
       job.title = `Video ${videoId}`;
     }
 
-    // Set up flags for yt-dlp execution
-    const flags = {
-      output: outputPath,
-      noCheckCertificates: true,
-      noWarnings: true
-    };
+    // ---------------------------------------------------------
+    // DATA SAVER CHECK: Try to resolve instantly from cache
+    // ---------------------------------------------------------
+    const cachePath = path.join(DOWNLOADS_DIR, `cache_${videoId}.mp4`);
+    const isCacheComplete = fs.existsSync(cachePath) && !cacheJobs[videoId];
 
-    if (type === 'audio') {
-      flags.extractAudio = true;
-      flags.audioFormat = 'mp3';
-      flags.audioQuality = `${quality}K`;
-    } else {
-      // Best video quality up to requested height + best audio, muxed to mp4
-      flags.format = `bestvideo[height<=${quality}]+bestaudio/best`;
-      flags.mergeOutputFormat = 'mp4';
-    }
+    if (isCacheComplete) {
+      if (type === 'video') {
+        fs.copyFileSync(cachePath, outputPath);
+        job.progress = 100;
+        job.status = 'completed';
+        console.log(`Job ${jobId} (video) resolved instantly from cache file.`);
+        return;
+      } else if (type === 'audio') {
+        // Transcode the locally cached video to mp3 instantly using local ffmpeg
+        console.log(`Transcoding local cache file ${cachePath} to audio job ${jobId}...`);
+        const ffmpegProcess = spawn('ffmpeg', [
+          '-i', cachePath,
+          '-b:a', `${quality}k`,
+          '-f', 'mp3',
+          '-y',
+          outputPath
+        ]);
 
-    console.log(`Starting yt-dlp download/convert for job ${jobId} (Type: ${type}, Quality: ${quality})...`);
-    
-    // Spawn the yt-dlp subprocess
-    const child = youtubedl.exec(videoUrl, flags);
-    
-    child.stdout.on('data', (data) => {
-      const text = data.toString();
-      const match = text.match(/\[download\]\s+(\d+(?:\.\d+)?)%/);
-      if (match) {
-        const percentage = parseFloat(match[1]);
-        job.progress = Math.min(percentage, 99);
+        ffmpegProcess.on('close', (code) => {
+          if (code === 0) {
+            job.progress = 100;
+            job.status = 'completed';
+            console.log(`Job ${jobId} (audio) resolved instantly via local transcode.`);
+          } else {
+            console.error(`Local transcode failed with code ${code}. Falling back to downloading.`);
+            downloadFromYouTube(jobId, videoUrl, type, quality, outputPath);
+          }
+        });
+        return;
       }
-    });
-
-    child.stderr.on('data', (data) => {
-      console.warn(`[yt-dlp stderr for job ${jobId}]:`, data.toString());
-    });
-
-    // Wait for process completion
-    await child;
-
-    // Verify output file existence
-    if (fs.existsSync(outputPath)) {
-      job.progress = 100;
-      job.status = 'completed';
-      console.log(`Job ${jobId} completed successfully! Saved to ${outputPath}`);
-    } else {
-      throw new Error(`Output file not found at ${outputPath}`);
     }
+
+    // Fallback: standard download from YouTube
+    await downloadFromYouTube(jobId, videoUrl, type, quality, outputPath);
 
   } catch (error) {
     console.error(`Conversion job ${jobId} failed:`, error);
@@ -220,7 +452,54 @@ async function runConversionJob(jobId, videoId, type, quality) {
   }
 }
 
-// Scheduled downloads cleanup routine
+// Download stream executor helper
+async function downloadFromYouTube(jobId, videoUrl, type, quality, outputPath) {
+  const job = jobs[jobId];
+  const flags = {
+    output: outputPath,
+    noCheckCertificates: true,
+    noWarnings: true
+  };
+
+  if (type === 'audio') {
+    flags.extractAudio = true;
+    flags.audioFormat = 'mp3';
+    flags.audioQuality = `${quality}K`;
+  } else {
+    flags.format = `bestvideo[height<=${quality}]+bestaudio/best`;
+    flags.mergeOutputFormat = 'mp4';
+  }
+
+  console.log(`Downloading stream from YouTube for job ${jobId}...`);
+  const child = youtubedl.exec(videoUrl, flags);
+  
+  child.stdout.on('data', (data) => {
+    const text = data.toString();
+    const match = text.match(/\[download\]\s+(\d+(?:\.\d+)?)%/);
+    if (match) {
+      const percentage = parseFloat(match[1]);
+      job.progress = Math.min(percentage, 99);
+    }
+  });
+
+  child.stderr.on('data', (data) => {
+    console.warn(`[yt-dlp stderr for job ${jobId}]:`, data.toString());
+  });
+
+  await child;
+
+  if (fs.existsSync(outputPath)) {
+    job.progress = 100;
+    job.status = 'completed';
+    console.log(`Job ${jobId} downloaded successfully.`);
+  } else {
+    throw new Error(`Output file not found after download.`);
+  }
+}
+
+// ----------------------------------------------------
+// Scheduled Downloads & Cache Cleanup
+// ----------------------------------------------------
 const CLEANUP_THRESHOLD_HOURS = parseInt(process.env.CLEANUP_THRESHOLD_HOURS) || 24;
 const CLEANUP_INTERVAL_MINUTES = parseInt(process.env.CLEANUP_INTERVAL_MINUTES) || 60;
 
@@ -255,9 +534,9 @@ function startCleanupSchedule() {
               } else {
                 console.log(`Deleted stale download file: ${file} (Age: ${(ageMs / (60 * 60 * 1000)).toFixed(1)} hours)`);
                 
-                // Also remove from jobs database if tracked
+                // Remove job from tracking if applicable
                 const jobId = path.basename(file, path.extname(file));
-                const baseJobId = jobId.split('_')[0];
+                const baseJobId = jobId.replace('cache_', '').split('_')[0];
                 if (jobs[baseJobId]) {
                   delete jobs[baseJobId];
                   console.log(`Removed job ${baseJobId} from tracking database.`);

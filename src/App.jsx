@@ -1,26 +1,53 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { useYoutubeConverter } from './hooks/useYoutubeConverter';
-import Header from './components/Header';
-import ConverterForm from './components/ConverterForm';
-import VideoPreview from './components/VideoPreview';
-import ProgressBar from './components/ProgressBar';
-import DownloadAction from './components/DownloadAction';
-import ConversionHistory from './components/ConversionHistory';
-import Footer from './components/Footer';
-import FormatSelector from './components/FormatSelector';
+import { fetchTrending, searchVideos, fetchVideoDetails, fetchComments } from './services/youtube';
 import { getMedia } from './services/db';
-import { X, Volume2, Film, PictureInPicture, Play, Pause, Volume1, VolumeX, Music, SkipBack, SkipForward, Maximize, Minimize } from 'lucide-react';
+import { 
+  X, Volume2, Film, PictureInPicture, Play, Pause, Volume1, VolumeX, 
+  SkipBack, SkipForward, Maximize, Minimize, Search, Settings, Clock, 
+  Download, ChevronDown, ChevronUp, ThumbsUp, Menu, Library
+} from 'lucide-react';
+
+// Sub-component to render offline thumbnails loaded from IndexedDB
+function OfflineThumbnail({ storageId, fallbackId, className }) {
+  const [src, setSrc] = useState(null);
+
+  useEffect(() => {
+    let url = null;
+    async function loadThumb() {
+      try {
+        const blob = await getMedia(`${storageId}-thumbnail`);
+        if (blob) {
+          url = URL.createObjectURL(blob);
+          setSrc(url);
+        }
+      } catch (err) {
+        console.warn('Failed to load local thumbnail:', err);
+      }
+    }
+    loadThumb();
+
+    return () => {
+      if (url) URL.revokeObjectURL(url);
+    };
+  }, [storageId]);
+
+  const fallbackUrl = `https://img.youtube.com/vi/${fallbackId}/mqdefault.jpg`;
+  return (
+    <img 
+      src={src || fallbackUrl} 
+      alt="Video Thumbnail" 
+      className={className} 
+      loading="lazy"
+    />
+  );
+}
 
 export default function App() {
   const {
-    url,
-    setUrl,
-    status,
-    progress,
-    errorMsg,
     history,
-    currentVideo,
-    downloadUrl,
+    progress,
+    status,
     audioFormats,
     videoFormats,
     selectedFormat,
@@ -34,45 +61,94 @@ export default function App() {
     handleSaveToBrowser,
     handleDeleteFromBrowser,
     handleSaveHistoryItemToBrowser,
-    handleDownloadFromBrowser,
-    handleReset,
+    downloadUrl,
     clearHistory,
     deleteHistoryItem
   } = useYoutubeConverter();
 
-  // Active Playback Overlay State
-  const [activePlayItem, setActivePlayItem] = useState(null); // { title, ext, src }
-  const [activeTab, setActiveTab] = useState(() => {
-    try {
-      const stored = localStorage.getItem('tubehub_active_tab');
-      return (stored === 'converter' || stored === 'library') ? stored : 'converter';
-    } catch {
-      return 'converter';
+  // Custom Router State: Home, Watch, Library, Settings, History
+  const [route, setRoute] = useState(() => {
+    const path = window.location.pathname;
+    const searchParams = new URLSearchParams(window.location.search);
+    const v = searchParams.get('v');
+    if (path === '/watch' && v) {
+      return { name: 'watch', videoId: v };
     }
+    if (path === '/library') return { name: 'library' };
+    if (path === '/history') return { name: 'history' };
+    if (path === '/settings') return { name: 'settings' };
+    return { name: 'home', query: searchParams.get('q') || '' };
   });
-  const [isPiPActive, setIsPiPActive] = useState(false);
 
-  // Custom Audio Player States
-  const audioElRef = useRef(null);
-  const [audioIsPlaying, setAudioIsPlaying] = useState(false);
-  const [audioCurrentTime, setAudioCurrentTime] = useState(0);
-  const [audioDuration, setAudioDuration] = useState(0);
-  const [audioVolume, setAudioVolume] = useState(0.8);
-  const [audioIsMuted, setAudioIsMuted] = useState(false);
+  const [searchQuery, setSearchQuery] = useState(route.query || '');
 
-  // Playback progress resume states
-  const [playbackProgress, setPlaybackProgress] = useState(() => {
-    try {
-      const stored = localStorage.getItem('tubehub_playback_progress');
-      return stored ? JSON.parse(stored) : {};
-    } catch {
-      return {};
+  const navigate = (pageName, params = {}) => {
+    let path = '/';
+    let search = '';
+    if (pageName === 'watch' && params.v) {
+      path = '/watch';
+      search = `?v=${params.v}`;
+    } else if (pageName === 'library') {
+      path = '/library';
+    } else if (pageName === 'history') {
+      path = '/history';
+    } else if (pageName === 'settings') {
+      path = '/settings';
+    } else if (pageName === 'home') {
+      path = '/';
+      if (params.q) search = `?q=${encodeURIComponent(params.q)}`;
+      setSearchQuery(params.q || '');
     }
-  });
-  const lastProgressSaveRef = useRef({});
-  const videoHasSeekedRef = useRef(false);
+    
+    window.history.pushState({}, '', `${path}${search}`);
+    setRoute({ name: pageName, ...params });
+  };
+
+  useEffect(() => {
+    const handlePopState = () => {
+      const path = window.location.pathname;
+      const searchParams = new URLSearchParams(window.location.search);
+      const v = searchParams.get('v');
+      if (path === '/watch' && v) {
+        setRoute({ name: 'watch', videoId: v });
+      } else if (path === '/library') {
+        setRoute({ name: 'library' });
+      } else if (path === '/history') {
+        setRoute({ name: 'history' });
+      } else if (path === '/settings') {
+        setRoute({ name: 'settings' });
+      } else {
+        const q = searchParams.get('q') || '';
+        setSearchQuery(q);
+        setRoute({ name: 'home', query: q });
+      }
+    };
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, []);
+
+  // UI layout and search states
+  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [feedVideos, setFeedVideos] = useState([]);
+  const [feedPageToken, setFeedPageToken] = useState('');
+  const [feedLoading, setFeedLoading] = useState(false);
+  const [feedError, setFeedError] = useState('');
+  const [activeCategory, setActiveCategory] = useState('');
+
+  // Watch page state
+  const [watchDetails, setWatchDetails] = useState(null);
+  const [watchComments, setWatchComments] = useState([]);
+  const [watchCommentsToken, setWatchCommentsToken] = useState('');
+  const [watchLoading, setWatchLoading] = useState(false);
+  const [descExpanded, setDescExpanded] = useState(false);
+  const [expandedComments, setExpandedComments] = useState({}); // threadId -> boolean
+  const [autoplayEnabled, setAutoplayEnabled] = useState(true);
+
+  // Playback States
+  const [activePlayItem, setActivePlayItem] = useState(null); // { title, ext, src, id }
 
   // Custom Video Player States
+  const videoRef = useRef(null);
   const videoContainerRef = useRef(null);
   const controlsTimeoutRef = useRef(null);
   const [videoIsPlaying, setVideoIsPlaying] = useState(false);
@@ -84,459 +160,301 @@ export default function App() {
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [isDraggingVideoTimeline, setIsDraggingVideoTimeline] = useState(false);
 
-  // Reset seek guard on active item changes
-  useEffect(() => {
-    videoHasSeekedRef.current = false;
-  }, [activePlayItem]);
+  // Custom Local API Key settings
+  const [apiKeyInput, setApiKeyInput] = useState(() => localStorage.getItem('yt-api-key') || '');
 
-  const savePlaybackProgress = (item, currentTime, duration) => {
-    if (!item || !duration || isNaN(duration)) return;
+  // YouTube popular categories list
+  const categories = [
+    { id: '', name: 'All' },
+    { id: '10', name: 'Music' },
+    { id: '20', name: 'Gaming' },
+    { id: '17', name: 'Sports' },
+    { id: '24', name: 'Entertainment' },
+    { id: '28', name: 'Science & Tech' },
+    { id: '25', name: 'News' }
+  ];
+
+  // Helper to format duration string (e.g. PT4M13S to 4:13)
+  const formatISO8601Duration = (isoDuration) => {
+    if (!isoDuration) return '';
+    const match = isoDuration.match(/PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?/);
+    if (!match) return '';
+    const hours = parseInt(match[1]) || 0;
+    const minutes = parseInt(match[2]) || 0;
+    const seconds = parseInt(match[3]) || 0;
     
-    const key = `${item.id}-${item.quality || '320'}-${item.ext}`;
-    const now = Date.now();
-    const lastSave = lastProgressSaveRef.current[key] || 0;
-    
-    // Save every 2 seconds, or if currentTime is 0, or at the end
-    if (now - lastSave >= 2000 || currentTime === 0 || Math.abs(currentTime - duration) < 1) {
-      lastProgressSaveRef.current[key] = now;
-      
-      try {
-        const percentage = (currentTime / duration) * 100;
-        const isCompleted = currentTime >= duration - 5 || percentage > 97;
-        
-        const updatedProgress = {
-          currentTime: isCompleted ? 0 : currentTime,
-          duration,
-          percentage: isCompleted ? 100 : percentage,
-          updatedAt: now
-        };
-        
-        setPlaybackProgress(prev => {
-          const newMap = {
-            ...prev,
-            [key]: updatedProgress
-          };
-          localStorage.setItem('tubehub_playback_progress', JSON.stringify(newMap));
-          return newMap;
-        });
-      } catch (e) {
-        console.error('Failed to save playback progress', e);
-      }
+    if (hours > 0) {
+      return `${hours}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
     }
+    return `${minutes}:${seconds.toString().padStart(2, '0')}`;
   };
 
-  const clearPlaybackProgress = (item) => {
-    if (!item) return;
-    const key = `${item.id}-${item.quality || '320'}-${item.ext}`;
+  // Helper to format view numbers (e.g. 1000000 to 1M views)
+  const formatViewCount = (count) => {
+    const num = parseInt(count);
+    if (isNaN(num)) return '0 views';
+    if (num >= 1e9) return `${(num / 1e9).toFixed(1).replace(/\.0$/, '')}B views`;
+    if (num >= 1e6) return `${(num / 1e6).toFixed(1).replace(/\.0$/, '')}M views`;
+    if (num >= 1e3) return `${(num / 1e3).toFixed(0)}K views`;
+    return `${num} views`;
+  };
+
+  // Helper to format upload times relatively
+  const getRelativeTime = (dateString) => {
+    if (!dateString) return '';
+    const date = new Date(dateString);
+    const now = new Date();
+    const diffMs = now - date;
+    const diffSec = Math.floor(diffMs / 1000);
+    const diffMin = Math.floor(diffSec / 60);
+    const diffHrs = Math.floor(diffMin / 60);
+    const diffDays = Math.floor(diffHrs / 24);
+    const diffMonths = Math.floor(diffDays / 30);
+    const diffYears = Math.floor(diffDays / 365);
+
+    if (diffYears > 0) return `${diffYears} year${diffYears > 1 ? 's' : ''} ago`;
+    if (diffMonths > 0) return `${diffMonths} month${diffMonths > 1 ? 's' : ''} ago`;
+    if (diffDays > 0) return `${diffDays} day${diffDays > 1 ? 's' : ''} ago`;
+    if (diffHrs > 0) return `${diffHrs} hour${diffHrs > 1 ? 's' : ''} ago`;
+    if (diffMin > 0) return `${diffMin} minute${diffMin > 1 ? 's' : ''} ago`;
+    return 'Just now';
+  };
+
+  // Fetch Home Feed (Trending or Search)
+  const loadFeed = useCallback(async (replace = true, pageToken = '') => {
+    setFeedLoading(true);
+    setFeedError('');
     try {
-      setPlaybackProgress(prev => {
-        const itemProgress = prev[key];
-        const newMap = {
-          ...prev,
-          [key]: {
-            currentTime: 0,
-            duration: itemProgress ? itemProgress.duration : 0,
-            percentage: 100,
-            updatedAt: Date.now()
-          }
-        };
-        localStorage.setItem('tubehub_playback_progress', JSON.stringify(newMap));
-        return newMap;
-      });
-    } catch (e) {
-      console.error('Failed to clear playback progress', e);
-    }
-  };
+      let data;
+      if (route.name === 'home' && route.query) {
+        data = await searchVideos(route.query, pageToken);
+      } else {
+        data = await fetchTrending(pageToken, activeCategory);
+      }
 
-  const resumePlaybackPosition = (element, isAudio = false) => {
-    if (!element || !activePlayItem || videoHasSeekedRef.current) return;
+      const items = data.items || [];
+      if (replace) {
+        setFeedVideos(items);
+      } else {
+        setFeedVideos(prev => [...prev, ...items]);
+      }
+      setFeedPageToken(data.nextPageToken || '');
+    } catch (err) {
+      console.error(err);
+      setFeedError(err.message || 'Error loading feed items.');
+    } finally {
+      setFeedLoading(false);
+    }
+  }, [route.name, route.query, activeCategory]);
+
+  useEffect(() => {
+    if (route.name === 'home') {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      loadFeed(true);
+    }
+  }, [route.name, loadFeed]);
+
+  // Handle watch details and streaming source resolve
+  const loadWatchDetails = useCallback(async (videoId) => {
+    setWatchLoading(true);
+    setWatchDetails(null);
+    setWatchComments([]);
+    setWatchCommentsToken('');
     
-    const key = `${activePlayItem.id}-${activePlayItem.quality || '320'}-${activePlayItem.ext}`;
-    const savedProgress = localStorage.getItem('tubehub_playback_progress');
-    if (savedProgress) {
-      try {
-        const progressMap = JSON.parse(savedProgress);
-        const itemProgress = progressMap[key];
-        if (itemProgress && itemProgress.currentTime) {
-          const duration = element.duration;
-          if (duration && !isNaN(duration)) {
-            const isNearEnd = itemProgress.currentTime >= duration - 5 || (itemProgress.percentage && itemProgress.percentage > 97);
-            if (!isNearEnd) {
-              element.currentTime = itemProgress.currentTime;
-              if (isAudio) {
-                setAudioCurrentTime(itemProgress.currentTime);
-              }
-            }
-            videoHasSeekedRef.current = true;
+    // Auto initiate conversion fetching to resolve MP3/MP4 conversion download option formats
+    handleConvert(videoId);
+
+    try {
+      // 1. Fetch metadata and comments in parallel
+      const [details, commentsData] = await Promise.all([
+        fetchVideoDetails(videoId).catch(() => null),
+        fetchComments(videoId).catch(() => ({ items: [] }))
+      ]);
+
+      if (details) {
+        setWatchDetails(details);
+      }
+      setWatchComments(commentsData.items || []);
+      setWatchCommentsToken(commentsData.nextPageToken || '');
+
+      // 2. Determine if video exists offline in browser IndexedDB
+      let offlineBlob = null;
+      let offlineItem = null;
+
+      // Check offline formats
+      for (const item of history) {
+        if (item.id === videoId && item.savedInBrowser) {
+          const storageId = `${item.id}-${item.quality}-${item.ext}`;
+          const blob = await getMedia(storageId).catch(() => null);
+          if (blob) {
+            offlineBlob = blob;
+            offlineItem = item;
+            break;
           }
         }
-      } catch (e) {
-        console.error('Failed to restore playback progress', e);
       }
-    }
-  };
 
-  const handleAudioPlayPause = () => {
-    if (!audioElRef.current) return;
-    if (audioIsPlaying) {
-      audioElRef.current.pause();
-    } else {
-      audioElRef.current.play().catch(() => {});
-    }
-  };
-
-  const handleAudioTimeUpdate = () => {
-    if (!audioElRef.current) return;
-    const currentTime = audioElRef.current.currentTime;
-    setAudioCurrentTime(currentTime);
-    if (activePlayItem) {
-      savePlaybackProgress(activePlayItem, currentTime, audioElRef.current.duration);
-    }
-  };
-
-  const handleAudioLoadedMetadata = () => {
-    if (!audioElRef.current) return;
-    setAudioDuration(audioElRef.current.duration);
-    resumePlaybackPosition(audioElRef.current, true);
-  };
-
-  const handleAudioEnded = () => {
-    setAudioIsPlaying(false);
-    setAudioCurrentTime(0);
-    if (activePlayItem) {
-      clearPlaybackProgress(activePlayItem);
-    }
-  };
-
-  const handleVideoTimeUpdate = () => {
-    if (!videoRef.current || !activePlayItem || isDraggingVideoTimeline) return;
-    const currentTime = videoRef.current.currentTime;
-    setVideoCurrentTime(currentTime);
-    savePlaybackProgress(activePlayItem, currentTime, videoRef.current.duration);
-  };
-
-  const handleVideoLoadedMetadata = () => {
-    if (!videoRef.current) return;
-    setVideoDuration(videoRef.current.duration);
-    resumePlaybackPosition(videoRef.current, false);
-  };
-
-  const handleVideoCanPlay = () => {
-    if (!videoRef.current) return;
-    resumePlaybackPosition(videoRef.current, false);
-  };
-
-  const handleVideoEnded = () => {
-    if (activePlayItem) {
-      clearPlaybackProgress(activePlayItem);
-    }
-    if (hasNextVideo) {
-      handleNextVideo();
-    } else {
-      if ('mediaSession' in navigator) {
-        // eslint-disable-next-line
-        navigator.mediaSession.playbackState = 'none';
+      // 3. Resolve stream URL
+      if (offlineBlob && offlineItem) {
+        console.log('Resolving watch player to local IndexedDB blob URL.');
+        const localUrl = URL.createObjectURL(offlineBlob);
+        setActivePlayItem({
+          title: offlineItem.title,
+          ext: offlineItem.ext,
+          src: localUrl,
+          id: videoId,
+          isOffline: true
+        });
+      } else {
+        console.log('Resolving watch player to privacy-first backend stream proxy.');
+        setActivePlayItem({
+          title: details?.snippet?.title || 'Streaming Video',
+          ext: 'mp4',
+          src: `/api/v5/stream/${videoId}`,
+          id: videoId,
+          isOffline: false
+        });
       }
-      closePlayer();
+
+    } catch (err) {
+      console.error('Watch loading failed:', err);
+    } finally {
+      setWatchLoading(false);
+    }
+  }, [history, handleConvert]);
+
+  useEffect(() => {
+    if (route.name === 'watch') {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      loadWatchDetails(route.videoId);
+    } else {
+      // Clean up active playback item on navigating away
+      if (activePlayItem && activePlayItem.src.startsWith('blob:')) {
+        URL.revokeObjectURL(activePlayItem.src);
+      }
+      setActivePlayItem(null);
+      setVideoIsPlaying(false);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [route.name, route.videoId, loadWatchDetails]);
+
+  // Load more comments
+  const loadMoreComments = async () => {
+    if (!watchCommentsToken || !watchDetails) return;
+    try {
+      const commentsData = await fetchComments(watchDetails.id, watchCommentsToken);
+      setWatchComments(prev => [...prev, ...(commentsData.items || [])]);
+      setWatchCommentsToken(commentsData.nextPageToken || '');
+    } catch (err) {
+      console.warn('Failed to load more comments:', err);
+    }
+  };
+
+  // Autoplay next video implementation
+  const playNextVideo = () => {
+    if (feedVideos.length === 0) return;
+    const currentIndex = feedVideos.findIndex(v => v.id === route.videoId);
+    const nextIndex = currentIndex !== -1 ? currentIndex + 1 : 0;
+    
+    if (nextIndex < feedVideos.length) {
+      const nextVideo = feedVideos[nextIndex];
+      navigate('watch', { v: nextVideo.id });
+    }
+  };
+
+  // API Key local save
+  const handleSaveApiKey = (e) => {
+    e.preventDefault();
+    localStorage.setItem('yt-api-key', apiKeyInput);
+    alert('API Key updated successfully! Reloading feed...');
+    navigate('home');
+  };
+
+  const handleClearApiKey = () => {
+    localStorage.removeItem('yt-api-key');
+    setApiKeyInput('');
+    alert('API Key cleared. Falling back to backend server key.');
+    navigate('home');
+  };
+
+  // ----------------------------------------------------
+  // Custom Media Player Control Functions
+  // ----------------------------------------------------
+
+  const resetControlsTimeout = () => {
+    setShowVideoControls(true);
+    if (controlsTimeoutRef.current) clearTimeout(controlsTimeoutRef.current);
+    if (videoIsPlaying) {
+      controlsTimeoutRef.current = setTimeout(() => {
+        setShowVideoControls(false);
+      }, 2500);
     }
   };
 
   const handleVideoPlayPause = () => {
     if (!videoRef.current) return;
-    if (videoRef.current.paused) {
-      videoRef.current.play().catch(() => {});
-    } else {
+    if (videoIsPlaying) {
       videoRef.current.pause();
+    } else {
+      videoRef.current.play().catch(() => {});
+    }
+    resetControlsTimeout();
+  };
+
+  const handleVideoTimeUpdate = () => {
+    if (!videoRef.current || isDraggingVideoTimeline) return;
+    setVideoCurrentTime(videoRef.current.currentTime);
+  };
+
+  const handleVideoLoadedMetadata = () => {
+    if (!videoRef.current) return;
+    setVideoDuration(videoRef.current.duration);
+    resetControlsTimeout();
+  };
+
+  const seekVideo = (time) => {
+    if (!videoRef.current) return;
+    videoRef.current.currentTime = time;
+    setVideoCurrentTime(time);
+    resetControlsTimeout();
+  };
+
+  const handleVolumeChange = (vol) => {
+    if (!videoRef.current) return;
+    videoRef.current.volume = vol;
+    setVideoVolume(vol);
+    setVideoIsMuted(vol === 0);
+  };
+
+  const toggleMute = () => {
+    if (!videoRef.current) return;
+    const muted = !videoIsMuted;
+    videoRef.current.muted = muted;
+    setVideoIsMuted(muted);
+    if (!muted && videoVolume === 0) {
+      handleVolumeChange(0.5);
     }
   };
 
-  const seekVideo = (seekTime) => {
-    if (!videoRef.current) return;
-    videoRef.current.currentTime = seekTime;
-  };
-
-  const handleVideoVolumeChange = (e) => {
-    if (!videoRef.current) return;
-    const newVolume = parseFloat(e.target.value);
-    videoRef.current.volume = newVolume;
-    setVideoVolume(newVolume);
-    if (newVolume > 0) {
-      setVideoIsMuted(false);
-      videoRef.current.muted = false;
-    }
-  };
-
-  const handleVideoToggleMute = () => {
-    if (!videoRef.current) return;
-    const newMuted = !videoIsMuted;
-    videoRef.current.muted = newMuted;
-    setVideoIsMuted(newMuted);
-  };
-
-  const toggleFullscreen = async () => {
+  const toggleFullscreen = () => {
     if (!videoContainerRef.current) return;
-    try {
-      if (!document.fullscreenElement) {
-        await videoContainerRef.current.requestFullscreen();
-        setIsFullscreen(true);
-      } else {
-        await document.exitFullscreen();
-        setIsFullscreen(false);
-      }
-    } catch (err) {
-      console.error('Fullscreen request failed:', err);
+    if (!document.fullscreenElement) {
+      videoContainerRef.current.requestFullscreen()
+        .then(() => setIsFullscreen(true))
+        .catch(err => console.error(err));
+    } else {
+      document.exitFullscreen()
+        .then(() => setIsFullscreen(false));
     }
   };
 
-  const resetControlsTimeout = () => {
-    setShowVideoControls(true);
-    if (controlsTimeoutRef.current) {
-      clearTimeout(controlsTimeoutRef.current);
-    }
-    controlsTimeoutRef.current = setTimeout(() => {
-      if (videoRef.current && !videoRef.current.paused) {
-        setShowVideoControls(false);
-      }
-    }, 2500);
-  };
-
-  // Keyboard Shortcuts for Video Player
-  useEffect(() => {
-    const handleKeyDown = (e) => {
-      if (activePlayItem && activePlayItem.ext === 'mp4' && !isPiPActive) {
-        if (e.code === 'Space') {
-          e.preventDefault();
-          handleVideoPlayPause();
-        } else if (e.code === 'ArrowLeft') {
-          e.preventDefault();
-          if (videoRef.current) {
-            videoRef.current.currentTime = Math.max(0, videoRef.current.currentTime - 5);
-          }
-        } else if (e.code === 'ArrowRight') {
-          e.preventDefault();
-          if (videoRef.current) {
-            videoRef.current.currentTime = Math.min(videoRef.current.duration || 0, videoRef.current.currentTime + 5);
-          }
-        }
-      }
-    };
-
-    window.addEventListener('keydown', handleKeyDown);
-    return () => {
-      window.removeEventListener('keydown', handleKeyDown);
-    };
-  }, [activePlayItem, isPiPActive]);
-
-  // Sync Fullscreen State Change (Escape key)
   useEffect(() => {
     const handleFullscreenChange = () => {
       setIsFullscreen(!!document.fullscreenElement);
     };
     document.addEventListener('fullscreenchange', handleFullscreenChange);
-    return () => {
-      document.removeEventListener('fullscreenchange', handleFullscreenChange);
-    };
+    return () => document.removeEventListener('fullscreenchange', handleFullscreenChange);
   }, []);
-
-  // Controls Auto-Hide Cleanup
-  useEffect(() => {
-    return () => {
-      if (controlsTimeoutRef.current) {
-        clearTimeout(controlsTimeoutRef.current);
-      }
-    };
-  }, []);
-
-  // Playlist Navigation
-  const videoPlaylist = history.filter(item => item.ext === 'mp4');
-  const currentVideoIndex = videoPlaylist.findIndex(item => item.id === activePlayItem?.id);
-  const hasPrevVideo = currentVideoIndex > 0;
-  const hasNextVideo = currentVideoIndex < videoPlaylist.length - 1;
-
-  const handlePrevVideo = () => {
-    if (currentVideoIndex > 0) {
-      handlePlay(videoPlaylist[currentVideoIndex - 1]);
-    }
-  };
-
-  const handleNextVideo = () => {
-    if (currentVideoIndex < videoPlaylist.length - 1) {
-      handlePlay(videoPlaylist[currentVideoIndex + 1]);
-    }
-  };
-
-  const handleAudioSeek = (e) => {
-    if (!audioElRef.current) return;
-    const seekTime = parseFloat(e.target.value);
-    audioElRef.current.currentTime = seekTime;
-    setAudioCurrentTime(seekTime);
-  };
-
-  const handleAudioVolumeChange = (e) => {
-    if (!audioElRef.current) return;
-    const newVolume = parseFloat(e.target.value);
-    audioElRef.current.volume = newVolume;
-    setAudioVolume(newVolume);
-    if (newVolume > 0) {
-      setAudioIsMuted(false);
-      audioElRef.current.muted = false;
-    }
-  };
-
-  const handleAudioToggleMute = () => {
-    if (!audioElRef.current) return;
-    const newMuted = !audioIsMuted;
-    audioElRef.current.muted = newMuted;
-    setAudioIsMuted(newMuted);
-  };
-
-  const formatTime = (timeInSeconds) => {
-    if (isNaN(timeInSeconds)) return '0:00';
-    const minutes = Math.floor(timeInSeconds / 60);
-    const seconds = Math.floor(timeInSeconds % 60);
-    return `${minutes}:${seconds < 10 ? '0' : ''}${seconds}`;
-  };
-
-  const showStatusPanel = status === 'validating' || status === 'parsed' || status === 'converting' || status === 'ready';
-
-  // Resolves local IndexedDB blob URL or fallback streaming link to trigger browser playback
-  const handlePlay = async (item) => {
-    // Reset custom audio states first to avoid duration flashes
-    setAudioIsPlaying(false);
-    setAudioCurrentTime(0);
-    setAudioDuration(0);
-
-    try {
-      if (item.savedInBrowser) {
-        const storageId = `${item.id}-${item.quality}-${item.ext}`;
-        const blob = await getMedia(storageId);
-        if (blob) {
-          const localUrl = URL.createObjectURL(blob);
-          setActivePlayItem({
-            id: item.id,
-            title: item.title,
-            ext: item.ext,
-            quality: item.quality,
-            src: localUrl
-          });
-          return;
-        }
-      }
-      
-      // Fallback to remote streaming link
-      setActivePlayItem({
-        id: item.id,
-        title: item.title,
-        ext: item.ext,
-        quality: item.quality,
-        src: item.downloadUrl
-      });
-    } catch (err) {
-      console.error('Browser playback initialization failed:', err);
-      alert('Could not start playback. The link may have expired or is blocked.');
-    }
-  };
-
-  const handleTabChange = (tab) => {
-    setActiveTab(tab);
-    try {
-      localStorage.setItem('tubehub_active_tab', tab);
-    } catch (e) {
-      console.error('Failed to save active tab to localStorage', e);
-    }
-    if (tab === 'converter' && activePlayItem && activePlayItem.ext === 'mp4' && videoRef.current) {
-      // Switch tab within the app: trigger PiP automatically using the click gesture
-      videoRef.current.requestPictureInPicture().catch(err => {
-        console.warn('Auto enter Picture-in-Picture on tab switch failed:', err);
-      });
-    } else if (tab === 'library' && document.pictureInPictureElement) {
-      // Switch tab back to library: exit PiP automatically to restore modal
-      document.exitPictureInPicture().catch(() => {});
-    }
-  };
-
-  const handleReconvert = async (item) => {
-    const ytUrl = `https://www.youtube.com/watch?v=${item.id}`;
-    setUrl(ytUrl);
-    handleTabChange('converter');
-    handleConvert(ytUrl);
-  };
-
-  const videoRef = useRef(null);
-
-  // Monitor video state to register Chrome Media Session handlers for auto-PiP & media keys
-  useEffect(() => {
-    if (!videoRef.current || !activePlayItem || activePlayItem.ext !== 'mp4') return;
-    const videoElement = videoRef.current;
-
-    if ('mediaSession' in navigator) {
-      try {
-        // Set metadata for OS media controller & Chrome Media Hub
-        navigator.mediaSession.metadata = new MediaMetadata({
-          title: activePlayItem.title,
-          artist: 'TubeHub Media',
-          artwork: [
-            { 
-              src: activePlayItem.id 
-                ? `https://img.youtube.com/vi/${activePlayItem.id}/mqdefault.jpg` 
-                : 'https://img.youtube.com/vi/dQw4w9WgXcQ/mqdefault.jpg', 
-              sizes: '320x180', 
-              type: 'image/jpeg' 
-            }
-          ]
-        });
-
-        // Register the Chrome-specific automatic Picture-in-Picture action handler
-        navigator.mediaSession.setActionHandler('enterpictureinpicture', async () => {
-          try {
-            if (document.pictureInPictureElement !== videoElement) {
-              await videoElement.requestPictureInPicture();
-            }
-          } catch (err) {
-            console.error('MediaSession automatic Picture-in-Picture entry failed:', err);
-          }
-        });
-
-        // Register hardware keys & floating window play/pause controls
-        navigator.mediaSession.setActionHandler('play', () => {
-          videoElement.play().catch(() => {});
-        });
-        navigator.mediaSession.setActionHandler('pause', () => {
-          videoElement.pause();
-        });
-      } catch (err) {
-        console.warn('Failed to bind Media Session action handlers:', err);
-      }
-    }
-
-    // Monitor document visibility to automatically close PiP when tab becomes visible
-    const handleVisibilityChange = async () => {
-      try {
-        if (document.visibilityState === 'visible') {
-          if (document.pictureInPictureElement === videoElement) {
-            await document.exitPictureInPicture();
-          }
-        }
-      } catch (err) {
-        console.warn('Auto exit Picture-in-Picture failed:', err);
-      }
-    };
-
-    document.addEventListener('visibilitychange', handleVisibilityChange);
-
-    return () => {
-      document.removeEventListener('visibilitychange', handleVisibilityChange);
-      if ('mediaSession' in navigator) {
-        try {
-          navigator.mediaSession.setActionHandler('enterpictureinpicture', null);
-          navigator.mediaSession.setActionHandler('play', null);
-          navigator.mediaSession.setActionHandler('pause', null);
-          navigator.mediaSession.metadata = null;
-          navigator.mediaSession.playbackState = 'none';
-        } catch (e) {}
-      }
-    };
-  }, [activePlayItem]);
 
   const togglePiP = async () => {
     if (!videoRef.current) return;
@@ -547,483 +465,976 @@ export default function App() {
         await videoRef.current.requestPictureInPicture();
       }
     } catch (err) {
-      console.error('Manual Picture-in-Picture request failed:', err);
-      alert('Picture-in-Picture mode could not be initialized in this browser session.');
+      console.warn('Picture in Picture failed:', err);
     }
   };
 
-  const handleLeavePiP = () => {
-    setIsPiPActive(false);
-    if (activeTab === 'converter') {
-      closePlayer();
+  const handleVideoEnded = () => {
+    setVideoIsPlaying(false);
+    if (autoplayEnabled) {
+      console.log('Video ended. Autoplaying next video...');
+      playNextVideo();
     }
   };
 
-  const closePlayer = async () => {
-    // Clean up active PiP window if playing
-    if (document.pictureInPictureElement && document.pictureInPictureElement === videoRef.current) {
-      try {
-        await document.exitPictureInPicture();
-      } catch (e) {}
-    }
-    
-    // Pause custom audio if active
-    if (audioElRef.current) {
-      audioElRef.current.pause();
-    }
-    setAudioIsPlaying(false);
-    setAudioCurrentTime(0);
-    setAudioDuration(0);
-    
-    setIsPiPActive(false);
-    
-    // Revoke object URL if local to prevent memory leaks
-    if (activePlayItem && activePlayItem.src.startsWith('blob:')) {
-      URL.revokeObjectURL(activePlayItem.src);
-    }
-    setActivePlayItem(null);
+  const formatTime = (timeInSeconds) => {
+    if (isNaN(timeInSeconds)) return '0:00';
+    const mins = Math.floor(timeInSeconds / 60);
+    const secs = Math.floor(timeInSeconds % 60);
+    return `${mins}:${secs.toString().padStart(2, '0')}`;
   };
 
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100 font-sans selection:bg-rose-500/30 relative overflow-hidden flex flex-col justify-between">
-      {/* Dynamic ambient glow backdrops */}
-      <div className="absolute top-0 left-1/2 -translate-x-1/2 w-full max-w-7xl h-[500px] bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-rose-950/15 via-slate-950 to-transparent pointer-events-none z-0" />
-      <div className="absolute top-[20%] left-[10%] w-[350px] h-[350px] bg-red-900/5 rounded-full blur-[130px] pointer-events-none z-0" />
-      <div className="absolute top-[40%] right-[15%] w-[300px] h-[300px] bg-rose-900/5 rounded-full blur-[110px] pointer-events-none z-0" />
+    <div className="min-h-screen bg-[#0f0f0f] text-slate-100 flex flex-col font-sans antialiased selection:bg-rose-600/35 selection:text-white">
+      {/* --- HEADER --- */}
+      <header className="sticky top-0 z-40 bg-[#0f0f0f]/90 backdrop-blur-md border-b border-white/5 px-4 h-14 flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <button 
+            onClick={() => setSidebarOpen(!sidebarOpen)}
+            className="p-2 hover:bg-white/5 rounded-full text-slate-300 hover:text-white cursor-pointer active:scale-95 transition-all"
+          >
+            <Menu className="w-5 h-5" />
+          </button>
+          
+          <div 
+            onClick={() => navigate('home')} 
+            className="flex items-center gap-1.5 cursor-pointer font-bold text-white tracking-tight active:opacity-90 select-none"
+          >
+            <Film className="w-6 h-6 text-rose-500 fill-current" />
+            <span>TubeHub</span>
+            <span className="text-[10px] bg-rose-500/10 text-rose-400 font-semibold px-1.5 py-0.5 rounded-full ml-1 border border-rose-500/10">v5</span>
+          </div>
+        </div>
 
-      <div className="relative z-10 flex flex-col min-h-screen pb-24">
-        <Header activeTab={activeTab} setActiveTab={handleTabChange} libraryCount={history.length} />
+        {/* Search Form */}
+        <form 
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (searchQuery.trim()) navigate('home', { q: searchQuery.trim() });
+          }}
+          className="flex items-center w-full max-w-xl bg-[#121212] border border-white/10 rounded-full overflow-hidden shadow-inner focus-within:border-rose-500/50 transition-all"
+        >
+          <input 
+            type="text"
+            placeholder="Search privacy-first TubeHub..."
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            className="flex-1 bg-transparent px-4 py-1.5 text-sm text-slate-100 placeholder:text-slate-500 focus:outline-none"
+          />
+          <button 
+            type="submit"
+            className="px-5 bg-white/5 hover:bg-white/10 border-l border-white/10 text-slate-400 hover:text-white py-1.5 transition-colors cursor-pointer"
+          >
+            <Search className="w-4 h-4" />
+          </button>
+        </form>
 
-        <main className={`flex-1 w-full mx-auto px-4 sm:px-6 py-12 flex flex-col gap-12 justify-center transition-all duration-300 ${activeTab === 'library' ? 'max-w-6xl sm:max-w-7xl' : 'max-w-4xl'}`}>
-          {activeTab === 'converter' ? (
-            /* Main Converter Card */
-            <div className="bg-slate-900/20 border border-white/5 rounded-3xl p-6 sm:p-10 shadow-2xl relative overflow-hidden backdrop-blur-xl animate-in fade-in duration-300">
-              <div className="absolute top-0 left-0 w-full h-full bg-gradient-to-br from-white/[0.01] to-transparent pointer-events-none" />
-              
-              <div className="relative z-10 space-y-10">
-                {/* Header Titles */}
-                <div className="text-center max-w-xl mx-auto space-y-3">
-                  <h1 className="text-3xl sm:text-4xl font-extrabold tracking-tight text-white leading-tight">
-                    YouTube Converter
-                  </h1>
-                  <p className="text-slate-400 text-sm sm:text-base leading-relaxed">
-                    Extract high-quality audio and video files from YouTube in seconds. Completely free and secure.
-                  </p>
+        <div className="flex items-center gap-1.5">
+          <button 
+            onClick={() => navigate('settings')}
+            className="p-2 hover:bg-white/5 rounded-full text-slate-300 hover:text-white cursor-pointer transition"
+            title="Settings"
+          >
+            <Settings className="w-5 h-5" />
+          </button>
+        </div>
+      </header>
+
+      {/* --- BODY --- */}
+      <div className="flex flex-1 relative">
+        {/* --- SIDEBAR --- */}
+        <aside className={`sticky top-14 h-[calc(100vh-3.5rem)] bg-[#0f0f0f] border-r border-white/5 transition-all duration-300 flex flex-col z-30 shrink-0 ${
+          sidebarOpen ? 'w-56 p-2' : 'w-16 p-1 items-center'
+        }`}>
+          <div className="flex flex-col gap-1.5 w-full">
+            <button 
+              onClick={() => navigate('home')}
+              className={`flex items-center rounded-xl transition cursor-pointer select-none ${
+                sidebarOpen ? 'px-4 py-2.5 gap-4 w-full' : 'p-3 justify-center'
+              } ${route.name === 'home' ? 'bg-white/10 text-white font-semibold' : 'text-slate-400 hover:bg-white/5 hover:text-white'}`}
+            >
+              <Film className="w-5 h-5" />
+              {sidebarOpen && <span className="text-sm">Home</span>}
+            </button>
+
+            <button 
+              onClick={() => navigate('library')}
+              className={`flex items-center rounded-xl transition cursor-pointer select-none ${
+                sidebarOpen ? 'px-4 py-2.5 gap-4 w-full' : 'p-3 justify-center'
+              } ${route.name === 'library' ? 'bg-white/10 text-white font-semibold' : 'text-slate-400 hover:bg-white/5 hover:text-white'}`}
+            >
+              <Library className="w-5 h-5" />
+              {sidebarOpen && <span className="text-sm">Offline Library</span>}
+            </button>
+
+            <button 
+              onClick={() => navigate('history')}
+              className={`flex items-center rounded-xl transition cursor-pointer select-none ${
+                sidebarOpen ? 'px-4 py-2.5 gap-4 w-full' : 'p-3 justify-center'
+              } ${route.name === 'history' ? 'bg-white/10 text-white font-semibold' : 'text-slate-400 hover:bg-white/5 hover:text-white'}`}
+            >
+              <Clock className="w-5 h-5" />
+              {sidebarOpen && <span className="text-sm">History</span>}
+            </button>
+
+            <button 
+              onClick={() => navigate('settings')}
+              className={`flex items-center rounded-xl transition cursor-pointer select-none ${
+                sidebarOpen ? 'px-4 py-2.5 gap-4 w-full' : 'p-3 justify-center'
+              } ${route.name === 'settings' ? 'bg-white/10 text-white font-semibold' : 'text-slate-400 hover:bg-white/5 hover:text-white'}`}
+            >
+              <Settings className="w-5 h-5" />
+              {sidebarOpen && <span className="text-sm">Settings</span>}
+            </button>
+          </div>
+        </aside>
+
+        {/* --- MAIN CONTENT WINDOW --- */}
+        <main className="flex-1 min-w-0 p-4 sm:p-6 overflow-y-auto max-h-[calc(100vh-3.5rem)]">
+          {/* ====================================================
+              ROUTE: HOME / SEARCH
+              ==================================================== */}
+          {route.name === 'home' && (
+            <div className="flex flex-col gap-6">
+              {/* Category Pills (Only on trending page) */}
+              {!route.query && (
+                <div className="flex items-center gap-2 overflow-x-auto pb-1 scrollbar-thin select-none">
+                  {categories.map((cat) => (
+                    <button
+                      key={cat.id}
+                      onClick={() => setActiveCategory(cat.id)}
+                      className={`px-3 py-1.5 rounded-full text-xs font-semibold shrink-0 transition cursor-pointer ${
+                        activeCategory === cat.id 
+                          ? 'bg-white text-[#0f0f0f]' 
+                          : 'bg-white/5 text-slate-300 hover:bg-white/10 hover:text-white'
+                      }`}
+                    >
+                      {cat.name}
+                    </button>
+                  ))}
                 </div>
+              )}
 
-                {/* Input & Form Control */}
-                <div className="space-y-6">
-                  <ConverterForm 
-                    url={url} 
-                    setUrl={setUrl} 
-                    status={status} 
-                    handleConvert={handleConvert} 
-                    errorMsg={errorMsg} 
-                  />
+              {/* Error state */}
+              {feedError && (
+                <div className="p-4 bg-rose-500/10 border border-rose-500/20 text-rose-400 rounded-2xl flex items-center gap-3">
+                  <X className="w-5 h-5 shrink-0" />
+                  <span className="text-sm">{feedError}</span>
+                </div>
+              )}
 
-                  {/* Status Indicator Panel */}
-                  {showStatusPanel && (
-                    <div className="bg-slate-950/40 border border-white/5 rounded-2xl p-5 sm:p-6 space-y-6 backdrop-blur-md animate-in fade-in duration-300">
-                      {/* Render active video information once retrieved */}
-                      {currentVideo && <VideoPreview currentVideo={currentVideo} />}
-
-                      {/* Step 1: Validating the link */}
-                      {status === 'validating' && (
-                        <ProgressBar progress={0} status={status} ext={selectedFormat?.ext} />
-                      )}
-
-                      {/* Step 2: Selecting format and quality */}
-                      {status === 'parsed' && (
-                        <FormatSelector
-                          audioFormats={audioFormats}
-                          videoFormats={videoFormats}
-                          onSelect={handleStartConversion}
-                        />
-                      )}
-
-                      {/* Step 3: Performing conversion */}
-                      {status === 'converting' && (
-                        <ProgressBar progress={progress} status={status} ext={selectedFormat?.ext} />
-                      )}
-
-                      {/* Step 4: Ready to download */}
-                      {status === 'ready' && (
-                        <DownloadAction 
-                          downloadUrl={downloadUrl} 
-                          handleDownload={handleDownload}
-                          handleReset={handleReset}
-                          ext={selectedFormat?.ext}
-                          isSavingToBrowser={isSavingToBrowser}
-                          isSavedToBrowser={isSavedToBrowser}
-                          handleSaveToBrowser={handleSaveToBrowser}
-                          saveError={saveError}
-                        />
+              {/* Videos Grid */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-x-4 gap-y-8">
+                {feedVideos.map((video) => (
+                  <div 
+                    key={video.id} 
+                    onClick={() => navigate('watch', { v: video.id })}
+                    className="flex flex-col gap-2.5 group cursor-pointer"
+                  >
+                    {/* Thumbnail box */}
+                    <div className="relative aspect-video rounded-xl overflow-hidden bg-slate-900 border border-white/5 shadow-md">
+                      <img 
+                        src={video.snippet?.thumbnails?.medium?.url || 'https://img.youtube.com/vi/dQw4w9WgXcQ/mqdefault.jpg'} 
+                        alt={video.snippet?.title}
+                        className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+                        loading="lazy"
+                      />
+                      {/* Duration Overlay */}
+                      {video.contentDetails?.duration && (
+                        <div className="absolute bottom-2 right-2 bg-black/85 text-[10px] font-bold text-white px-1.5 py-0.5 rounded font-mono select-none">
+                          {formatISO8601Duration(video.contentDetails.duration)}
+                        </div>
                       )}
                     </div>
-                  )}
-                </div>
+
+                    {/* Metadata details */}
+                    <div className="flex gap-3 px-1">
+                      {/* Mock User Avatar */}
+                      <div className="w-9 h-9 rounded-full bg-rose-500/15 border border-rose-500/10 text-rose-400 flex items-center justify-center font-bold text-sm shrink-0">
+                        {video.snippet?.channelTitle?.charAt(0) || 'Y'}
+                      </div>
+                      
+                      <div className="flex flex-col min-w-0">
+                        <span className="text-sm font-semibold text-white leading-tight line-clamp-2 group-hover:text-rose-400 transition-colors" title={video.snippet?.title}>
+                          {video.snippet?.title}
+                        </span>
+                        
+                        <span className="text-xs text-slate-400 mt-1 hover:text-white transition-colors truncate">
+                          {video.snippet?.channelTitle}
+                        </span>
+                        
+                        <div className="flex items-center gap-1.5 text-[11px] text-slate-500 mt-0.5 select-none">
+                          <span>{formatViewCount(video.statistics?.viewCount)}</span>
+                          <span>•</span>
+                          <span>{getRelativeTime(video.snippet?.publishedAt)}</span>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                ))}
               </div>
-            </div>
-          ) : (
-            /* Downloads Dashboard */
-            <div className="animate-in fade-in duration-300">
-              <ConversionHistory 
-                history={history} 
-                clearHistory={clearHistory}
-                onPlay={handlePlay}
-                onDeleteFromBrowser={handleDeleteFromBrowser}
-                onSaveToBrowser={handleSaveHistoryItemToBrowser}
-                onDownloadLocal={handleDownloadFromBrowser}
-                onGoToConverter={() => handleTabChange('converter')}
-                savingIds={savingIds}
-                onDeleteHistoryItem={deleteHistoryItem}
-                onReconvert={handleReconvert}
-                playbackProgress={playbackProgress}
-              />
+
+              {/* Load More Trigger */}
+              {feedVideos.length > 0 && !feedLoading && (
+                <div className="flex justify-center mt-6">
+                  <button
+                    onClick={() => loadFeed(false, feedPageToken)}
+                    className="px-6 py-2.5 border border-white/10 hover:bg-white/5 rounded-full text-sm font-semibold transition cursor-pointer active:scale-95"
+                  >
+                    Show More Videos
+                  </button>
+                </div>
+              )}
+
+              {/* Loader Grid */}
+              {feedLoading && (
+                <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-x-4 gap-y-8 animate-pulse mt-4">
+                  {[...Array(8)].map((_, i) => (
+                    <div key={i} className="flex flex-col gap-3">
+                      <div className="aspect-video bg-white/5 rounded-xl" />
+                      <div className="flex gap-3">
+                        <div className="w-9 h-9 rounded-full bg-white/5 shrink-0" />
+                        <div className="flex-1 flex flex-col gap-2">
+                          <div className="h-4 bg-white/5 rounded w-11/12" />
+                          <div className="h-3 bg-white/5 rounded w-3/4" />
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           )}
 
-          {/* Footer details */}
-          <Footer />
-        </main>
-      </div>
-
-      {/* --- IN-BROWSER AUDIO PLAYER (Bottom Docked) --- */}
-      {activePlayItem && activePlayItem.ext === 'mp3' && (
-        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 w-[94%] max-w-2xl bg-slate-900/95 border border-white/10 p-4 rounded-3xl backdrop-blur-xl shadow-2xl flex flex-col sm:flex-row items-center gap-4 animate-in slide-in-from-bottom-8 duration-300">
-          {/* Audio element (hidden controls) */}
-          <audio 
-            ref={audioElRef}
-            src={activePlayItem.src}
-            autoPlay
-            onPlay={() => setAudioIsPlaying(true)}
-            onPause={() => setAudioIsPlaying(false)}
-            onTimeUpdate={handleAudioTimeUpdate}
-            onLoadedMetadata={handleAudioLoadedMetadata}
-            onEnded={handleAudioEnded}
-          />
-
-          {/* Left Block: Thumbnail/Icon & Title */}
-          <div className="flex items-center gap-3 min-w-0 w-full sm:w-auto sm:max-w-[30%] flex-1 sm:flex-none">
-            <div className={`w-10 h-10 rounded-xl bg-gradient-to-tr from-rose-600 to-pink-500 border border-rose-500/20 flex items-center justify-center text-white flex-shrink-0 ${audioIsPlaying ? 'animate-spin' : ''}`} style={{ animationDuration: '10s' }}>
-              <Music className="w-5 h-5" />
-            </div>
-            <div className="min-w-0 flex-1">
-              <p className="text-xs font-bold text-white truncate" title={activePlayItem.title}>
-                {activePlayItem.title}
-              </p>
-              <p className="text-[10px] text-rose-400 font-semibold uppercase mt-0.5 tracking-wider">
-                {audioIsPlaying ? 'Now Playing' : 'Paused'}
-              </p>
-            </div>
-          </div>
-
-          {/* Center Block: Controls & Progress */}
-          <div className="flex flex-1 items-center gap-3 w-full min-w-0">
-            {/* Play/Pause Button */}
-            <button 
-              onClick={handleAudioPlayPause}
-              className="w-8 h-8 rounded-full bg-white text-slate-950 flex items-center justify-center hover:scale-105 active:scale-95 transition cursor-pointer flex-shrink-0"
-            >
-              {audioIsPlaying ? (
-                <Pause className="w-4.5 h-4.5 fill-current" />
-              ) : (
-                <Play className="w-4.5 h-4.5 fill-current ml-0.5" />
-              )}
-            </button>
-
-            {/* Time label: current */}
-            <span className="text-[10px] font-mono text-slate-400 flex-shrink-0">
-              {formatTime(audioCurrentTime)}
-            </span>
-
-            {/* Progress Slider (Timeline) */}
-            <input 
-              type="range"
-              min={0}
-              max={audioDuration || 100}
-              value={audioCurrentTime}
-              onChange={handleAudioSeek}
-              className="flex-1 min-w-0 w-full h-1 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-rose-500 focus:outline-none"
-              style={{
-                background: `linear-gradient(to right, #f43f5e 0%, #f43f5e ${audioDuration ? (audioCurrentTime / audioDuration) * 100 : 0}%, #1e293b ${audioDuration ? (audioCurrentTime / audioDuration) * 100 : 0}%, #1e293b 100%)`
-              }}
-            />
-
-            {/* Time label: duration */}
-            <span className="text-[10px] font-mono text-slate-400 flex-shrink-0">
-              {formatTime(audioDuration)}
-            </span>
-          </div>
-
-          {/* Right Block: Volume & Close */}
-          <div className="flex items-center gap-3 flex-shrink-0 justify-end w-full sm:w-auto">
-            {/* Volume controls */}
-            <div className="flex items-center gap-0.5 sm:gap-0 group/volume cursor-pointer">
-              {/* Volume Slider Container: always visible on mobile, expandable on desktop */}
-              <div className="w-16 opacity-100 sm:w-0 sm:opacity-0 sm:group-hover/volume:w-20 sm:group-hover/volume:opacity-100 transition-all duration-300 ease-in-out flex items-center overflow-hidden sm:pr-2">
-                <input 
-                  type="range"
-                  min={0}
-                  max={1}
-                  step={0.05}
-                  value={audioIsMuted ? 0 : audioVolume}
-                  onChange={handleAudioVolumeChange}
-                  className="w-16 sm:w-20 h-1 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-rose-500 focus:outline-none"
-                  style={{
-                    background: `linear-gradient(to right, #f43f5e 0%, #f43f5e ${(audioIsMuted ? 0 : audioVolume) * 100}%, #1e293b ${(audioIsMuted ? 0 : audioVolume) * 100}%, #1e293b 100%)`
-                  }}
-                />
-              </div>
-
-              <button 
-                onClick={handleAudioToggleMute}
-                className="text-slate-400 hover:text-white transition cursor-pointer p-1.5 hover:bg-white/5 rounded-lg flex-shrink-0"
-              >
-                {audioIsMuted || audioVolume === 0 ? (
-                  <VolumeX className="w-4.5 h-4.5" />
-                ) : audioVolume < 0.5 ? (
-                  <Volume1 className="w-4.5 h-4.5" />
-                ) : (
-                  <Volume2 className="w-4.5 h-4.5" />
-                )}
-              </button>
-            </div>
-
-            {/* Separator */}
-            <div className="w-[1px] h-4 bg-slate-800 hidden sm:block" />
-
-            {/* Close button */}
-            <button 
-              onClick={closePlayer}
-              className="p-1.5 hover:bg-white/5 border border-transparent hover:border-white/5 rounded-lg text-slate-400 hover:text-white transition-all duration-200 cursor-pointer"
-            >
-              <X className="w-4.5 h-4.5" />
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* --- IN-BROWSER VIDEO PLAYER (Centered Modal) --- */}
-      {activePlayItem && activePlayItem.ext === 'mp4' && (
-        <div className={`fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 sm:p-6 transition-all duration-300 animate-in fade-in ${isPiPActive ? 'pointer-events-none opacity-0 invisible w-0 h-0 overflow-hidden' : 'duration-300'}`}>
-          <div className="w-full max-w-5xl bg-slate-900 border border-white/10 rounded-3xl overflow-hidden shadow-2xl flex flex-col animate-in zoom-in-95 duration-300">
-            {/* Header */}
-            <div className="p-4 border-b border-white/5 flex items-center justify-between bg-slate-950/40">
-              <div className="flex items-center gap-2.5 min-w-0">
-                <Film className="w-4.5 h-4.5 text-amber-400" />
-                <span className="text-sm font-bold text-white truncate" title={activePlayItem.title}>
-                  {activePlayItem.title}
-                </span>
-              </div>
-              <div className="flex items-center gap-1.5">
-                <button 
-                  onClick={togglePiP}
-                  className="p-2 hover:bg-white/5 border border-transparent hover:border-white/5 rounded-xl text-slate-400 hover:text-white transition-all duration-200 cursor-pointer"
-                  title="Picture in Picture"
-                >
-                  <PictureInPicture className="w-4.5 h-4.5" />
-                </button>
-                <button 
-                  onClick={closePlayer}
-                  className="p-2 hover:bg-white/5 border border-transparent hover:border-white/5 rounded-xl text-slate-400 hover:text-white transition-all duration-200 cursor-pointer"
-                  title="Close Player"
-                >
-                  <X className="w-4.5 h-4.5" />
-                </button>
-              </div>
-            </div>
-
-            {/* Video container */}
-            <div 
-              ref={videoContainerRef}
-              onMouseMove={resetControlsTimeout}
-              onMouseLeave={() => videoIsPlaying && setShowVideoControls(false)}
-              className="relative aspect-video bg-black flex items-center justify-center group select-none overflow-hidden"
-            >
-              <video 
-                ref={videoRef}
-                src={activePlayItem.src} 
-                autoPlay 
-                autoPictureInPicture={true}
-                onClick={handleVideoPlayPause}
-                onDoubleClick={toggleFullscreen}
-                onPlay={() => {
-                  setVideoIsPlaying(true);
-                  if ('mediaSession' in navigator) {
-                    navigator.mediaSession.playbackState = 'playing';
-                  }
-                  resetControlsTimeout();
-                }}
-                onPause={() => {
-                  setVideoIsPlaying(false);
-                  if ('mediaSession' in navigator) {
-                    navigator.mediaSession.playbackState = 'paused';
-                  }
-                  setShowVideoControls(true);
-                }}
-                onLoadedMetadata={handleVideoLoadedMetadata}
-                onTimeUpdate={handleVideoTimeUpdate}
-                onCanPlay={handleVideoCanPlay}
-                onEnterPictureInPicture={() => setIsPiPActive(true)}
-                onLeavePictureInPicture={handleLeavePiP}
-                onEnded={handleVideoEnded}
-                className="w-full h-full object-contain cursor-pointer"
-              />
-
-              {/* Large center Play/Pause animation button */}
-              <div 
-                onClick={handleVideoPlayPause}
-                className={`absolute inset-0 flex items-center justify-center bg-black/25 transition-opacity duration-300 cursor-pointer ${
-                  showVideoControls ? 'opacity-100' : 'opacity-0 pointer-events-none'
-                }`}
-              >
-                <div className="w-16 h-16 rounded-full bg-white/10 hover:bg-white/20 border border-white/20 flex items-center justify-center text-white backdrop-blur-md shadow-lg transform active:scale-95 transition-all duration-300">
-                  {videoIsPlaying ? (
-                    <Pause className="w-7 h-7 fill-current" />
-                  ) : (
-                    <Play className="w-7 h-7 fill-current ml-1" />
-                  )}
-                </div>
-              </div>
-
-              {/* Bottom control bar overlay */}
-              <div 
-                className={`absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/90 via-black/60 to-transparent p-4 sm:p-6 flex flex-col gap-3 transition-opacity duration-300 z-20 ${
-                  showVideoControls ? 'opacity-100' : 'opacity-0 pointer-events-none'
-                }`}
-              >
-                {/* Progress bar timeline */}
-                <div className="flex items-center gap-3 w-full">
-                  <span className="text-[10px] font-mono text-slate-300 select-none">
-                    {formatTime(videoCurrentTime)}
-                  </span>
-                  
-                  <input 
-                    type="range"
-                    min={0}
-                    max={videoDuration || 100}
-                    value={videoCurrentTime}
-                    onInput={(e) => {
-                      setVideoCurrentTime(parseFloat(e.target.value));
-                    }}
-                    onChange={(e) => {
-                      const seekTime = parseFloat(e.target.value);
-                      seekVideo(seekTime);
-                      savePlaybackProgress(activePlayItem, seekTime, videoDuration);
-                      setIsDraggingVideoTimeline(false);
-                    }}
-                    onMouseDown={() => setIsDraggingVideoTimeline(true)}
-                    onTouchStart={() => setIsDraggingVideoTimeline(true)}
-                    className="flex-1 h-1.5 bg-white/20 hover:h-2 rounded-lg appearance-none cursor-pointer accent-rose-500 focus:outline-none transition-all duration-150"
-                    style={{
-                      background: `linear-gradient(to right, #f43f5e 0%, #f43f5e ${videoDuration ? (videoCurrentTime / videoDuration) * 100 : 0}%, rgba(255,255,255,0.2) ${videoDuration ? (videoCurrentTime / videoDuration) * 100 : 0}%, rgba(255,255,255,0.2) 100%)`
-                    }}
-                  />
-                  
-                  <span className="text-[10px] font-mono text-slate-300 select-none">
-                    {formatTime(videoDuration)}
-                  </span>
-                </div>
-
-                {/* Control buttons line */}
-                <div className="flex items-center justify-between w-full">
-                  {/* Left Controls: Prev, Play/Pause, Next, Volume */}
-                  <div className="flex items-center gap-3">
-                    {/* Previous Button */}
-                    <button 
-                      onClick={handlePrevVideo}
-                      disabled={!hasPrevVideo}
-                      className="p-1.5 text-slate-300 hover:text-white disabled:opacity-40 disabled:hover:text-slate-300 transition cursor-pointer"
-                      title="Previous video"
-                    >
-                      <SkipBack className="w-5 h-5 fill-current" />
-                    </button>
-
-                    {/* Play/Pause Button */}
-                    <button 
+          {/* ====================================================
+              ROUTE: WATCH PAGE (`/watch?v=videoId`)
+              ==================================================== */}
+          {route.name === 'watch' && (
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+              
+              {/* Left Column: Player & Comments */}
+              <div className="lg:col-span-2 flex flex-col gap-4">
+                {/* Embed custom video player */}
+                {activePlayItem && (
+                  <div 
+                    ref={videoContainerRef}
+                    onMouseMove={resetControlsTimeout}
+                    onMouseLeave={() => videoIsPlaying && setShowVideoControls(false)}
+                    className="relative aspect-video bg-black rounded-2xl overflow-hidden group select-none shadow-2xl border border-white/5 z-10"
+                  >
+                    <video 
+                      ref={videoRef}
+                      src={activePlayItem.src} 
+                      autoPlay 
+                      autoPictureInPicture={true}
                       onClick={handleVideoPlayPause}
-                      className="p-1.5 text-white hover:scale-110 active:scale-95 transition cursor-pointer"
-                      title={videoIsPlaying ? "Pause" : "Play"}
+                      onDoubleClick={toggleFullscreen}
+                      onPlay={() => {
+                        setVideoIsPlaying(true);
+                        resetControlsTimeout();
+                      }}
+                      onPause={() => {
+                        setVideoIsPlaying(false);
+                        setShowVideoControls(true);
+                      }}
+                      onLoadedMetadata={handleVideoLoadedMetadata}
+                      onTimeUpdate={handleVideoTimeUpdate}
+                      onEnded={handleVideoEnded}
+                      className="w-full h-full object-contain cursor-pointer"
+                    />
+
+                    {/* Play/Pause Overlay animation button */}
+                    <div 
+                      onClick={handleVideoPlayPause}
+                      className={`absolute inset-0 flex items-center justify-center bg-black/20 transition-opacity duration-300 cursor-pointer ${
+                        showVideoControls ? 'opacity-100' : 'opacity-0 pointer-events-none'
+                      }`}
                     >
-                      {videoIsPlaying ? (
-                        <Pause className="w-5 h-5 fill-current" />
-                      ) : (
-                        <Play className="w-5 h-5 fill-current ml-0.5" />
-                      )}
-                    </button>
-
-                    {/* Next Button */}
-                    <button 
-                      onClick={handleNextVideo}
-                      disabled={!hasNextVideo}
-                      className="p-1.5 text-slate-300 hover:text-white disabled:opacity-40 disabled:hover:text-slate-300 transition cursor-pointer"
-                      title="Next video"
-                    >
-                      <SkipForward className="w-5 h-5 fill-current" />
-                    </button>
-
-                    {/* Separator */}
-                    <div className="w-[1px] h-4 bg-white/10 mx-1" />
-
-                    {/* Volume Controls */}
-                    <div className="flex items-center gap-1.5 group/volume">
-                      <button 
-                        onClick={handleVideoToggleMute}
-                        className="text-slate-300 hover:text-white transition cursor-pointer"
-                        title={videoIsMuted ? "Unmute" : "Mute"}
-                      >
-                        {videoIsMuted || videoVolume === 0 ? (
-                          <VolumeX className="w-5 h-5" />
-                        ) : videoVolume < 0.5 ? (
-                          <Volume1 className="w-5 h-5" />
+                      <div className="w-14 h-14 rounded-full bg-white/10 hover:bg-white/20 border border-white/20 flex items-center justify-center text-white backdrop-blur-md shadow-lg transform active:scale-95 transition-all duration-300">
+                        {videoIsPlaying ? (
+                          <Pause className="w-6 h-6 fill-current" />
                         ) : (
-                          <Volume2 className="w-5 h-5" />
+                          <Play className="w-6 h-6 fill-current ml-1" />
                         )}
-                      </button>
-                      <input 
-                        type="range"
-                        min={0}
-                        max={1}
-                        step={0.05}
-                        value={videoIsMuted ? 0 : videoVolume}
-                        onChange={handleVideoVolumeChange}
-                        className="w-16 h-1 bg-white/20 rounded-lg appearance-none cursor-pointer accent-rose-500 focus:outline-none transition-all duration-150"
-                        style={{
-                          background: `linear-gradient(to right, #f43f5e 0%, #f43f5e ${(videoIsMuted ? 0 : videoVolume) * 100}%, rgba(255,255,255,0.2) ${(videoIsMuted ? 0 : videoVolume) * 100}%, rgba(255,255,255,0.2) 100%)`
-                        }}
-                      />
+                      </div>
+                    </div>
+
+                    {/* Bottom controls bar */}
+                    <div 
+                      className={`absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/95 via-black/70 to-transparent p-4 flex flex-col gap-2 transition-opacity duration-300 z-20 ${
+                        showVideoControls ? 'opacity-100' : 'opacity-0 pointer-events-none'
+                      }`}
+                    >
+                      {/* Progress scrubbing timeline */}
+                      <div className="flex items-center gap-2.5 w-full">
+                        <span className="text-[10px] font-mono text-slate-300 select-none">
+                          {formatTime(videoCurrentTime)}
+                        </span>
+                        
+                        <input 
+                          type="range"
+                          min={0}
+                          max={videoDuration || 100}
+                          value={videoCurrentTime}
+                          onInput={(e) => {
+                            setVideoCurrentTime(parseFloat(e.target.value));
+                          }}
+                          onChange={(e) => {
+                            const seekTime = parseFloat(e.target.value);
+                            seekVideo(seekTime);
+                            setIsDraggingVideoTimeline(false);
+                          }}
+                          onMouseDown={() => setIsDraggingVideoTimeline(true)}
+                          className="flex-1 h-1 bg-white/20 hover:h-1.5 rounded-lg appearance-none cursor-pointer accent-rose-500 focus:outline-none transition-all"
+                          style={{
+                            background: `linear-gradient(to right, #f43f5e 0%, #f43f5e ${videoDuration ? (videoCurrentTime / videoDuration) * 100 : 0}%, rgba(255,255,255,0.2) ${videoDuration ? (videoCurrentTime / videoDuration) * 100 : 0}%, rgba(255,255,255,0.2) 100%)`
+                          }}
+                        />
+                        
+                        <span className="text-[10px] font-mono text-slate-300 select-none">
+                          {formatTime(videoDuration)}
+                        </span>
+                      </div>
+
+                      {/* Controls line */}
+                      <div className="flex items-center justify-between w-full">
+                        <div className="flex items-center gap-3">
+                          <button 
+                            onClick={handleVideoPlayPause}
+                            className="text-white p-1 hover:scale-105 cursor-pointer"
+                          >
+                            {videoIsPlaying ? (
+                              <Pause className="w-5 h-5 fill-current" />
+                            ) : (
+                              <Play className="w-5 h-5 fill-current" />
+                            )}
+                          </button>
+
+                          {/* Skip buttons */}
+                          <button 
+                            onClick={() => seekVideo(Math.max(videoCurrentTime - 10, 0))}
+                            className="text-slate-300 hover:text-white p-1 cursor-pointer"
+                            title="Rewind 10s"
+                          >
+                            <SkipBack className="w-4.5 h-4.5" />
+                          </button>
+                          <button 
+                            onClick={() => seekVideo(Math.min(videoCurrentTime + 10, videoDuration))}
+                            className="text-slate-300 hover:text-white p-1 cursor-pointer"
+                            title="Fast Forward 10s"
+                          >
+                            <SkipForward className="w-4.5 h-4.5" />
+                          </button>
+
+                          {/* Volume controls */}
+                          <div className="flex items-center gap-2 group-volume">
+                            <button 
+                              onClick={toggleMute}
+                              className="text-slate-300 hover:text-white p-1 cursor-pointer"
+                            >
+                              {videoIsMuted ? (
+                                <VolumeX className="w-5 h-5" />
+                              ) : videoVolume > 0.5 ? (
+                                <Volume2 className="w-5 h-5" />
+                              ) : (
+                                <Volume1 className="w-5 h-5" />
+                              )}
+                            </button>
+                            <input 
+                              type="range"
+                              min={0}
+                              max={1}
+                              step={0.05}
+                              value={videoIsMuted ? 0 : videoVolume}
+                              onChange={(e) => handleVolumeChange(parseFloat(e.target.value))}
+                              className="w-16 h-1 bg-white/20 rounded-lg appearance-none cursor-pointer accent-rose-500"
+                            />
+                          </div>
+                        </div>
+
+                        {/* Right side controls: PiP, Fullscreen */}
+                        <div className="flex items-center gap-3">
+                          <button 
+                            onClick={togglePiP}
+                            className="text-slate-300 hover:text-white p-1 cursor-pointer"
+                            title="Picture-in-Picture"
+                          >
+                            <PictureInPicture className="w-4.5 h-4.5" />
+                          </button>
+                          <button 
+                            onClick={toggleFullscreen}
+                            className="text-slate-300 hover:text-white p-1 cursor-pointer"
+                            title="Fullscreen"
+                          >
+                            {isFullscreen ? (
+                              <Minimize className="w-5 h-5" />
+                            ) : (
+                              <Maximize className="w-5 h-5" />
+                            )}
+                          </button>
+                        </div>
+                      </div>
                     </div>
                   </div>
+                )}
 
-                  {/* Right Controls: PiP, Fullscreen */}
-                  <div className="flex items-center gap-3">
-                    <button 
-                      onClick={togglePiP}
-                      className="p-1.5 text-slate-300 hover:text-white transition cursor-pointer"
-                      title="Picture-in-Picture"
-                    >
-                      <PictureInPicture className="w-5 h-5" />
-                    </button>
+                {/* Video Info details block */}
+                {watchLoading && (
+                  <div className="flex flex-col gap-3 animate-pulse p-2">
+                    <div className="h-6 bg-white/5 rounded w-3/4" />
+                    <div className="h-4 bg-white/5 rounded w-1/4" />
+                  </div>
+                )}
 
-                    <button 
-                      onClick={toggleFullscreen}
-                      className="p-1.5 text-slate-300 hover:text-white transition cursor-pointer"
-                      title={isFullscreen ? "Exit Fullscreen" : "Fullscreen"}
-                    >
-                      {isFullscreen ? (
-                        <Minimize className="w-5 h-5" />
-                      ) : (
-                        <Maximize className="w-5 h-5" />
-                      )}
-                    </button>
+                {watchDetails && (
+                  <div className="flex flex-col gap-3">
+                    <h1 className="text-lg font-bold text-white leading-tight">
+                      {watchDetails.snippet?.title}
+                    </h1>
+
+                    <div className="flex flex-wrap items-center justify-between gap-4 border-b border-white/5 pb-4">
+                      {/* Channel profile */}
+                      <div className="flex items-center gap-3">
+                        <div className="w-10 h-10 rounded-full bg-rose-500/15 text-rose-400 font-bold border border-rose-500/10 flex items-center justify-center select-none">
+                          {watchDetails.snippet?.channelTitle?.charAt(0)}
+                        </div>
+                        <div className="flex flex-col min-w-0">
+                          <span className="text-sm font-bold text-white truncate">
+                            {watchDetails.snippet?.channelTitle}
+                          </span>
+                          <span className="text-[10px] text-slate-500 select-none">
+                            Privacy-First Stream Proxy
+                          </span>
+                        </div>
+                      </div>
+
+                      {/* Video actions */}
+                      <div className="flex items-center gap-2">
+                        {/* Autoplay toggler */}
+                        <button
+                          onClick={() => setAutoplayEnabled(!autoplayEnabled)}
+                          className={`px-3 py-1.5 rounded-full text-xs font-semibold border flex items-center gap-1.5 transition cursor-pointer ${
+                            autoplayEnabled 
+                              ? 'bg-rose-500/10 border-rose-500/20 text-rose-400' 
+                              : 'bg-white/5 border-white/10 text-slate-400 hover:text-white'
+                          }`}
+                        >
+                          <span>Autoplay</span>
+                          <span className="text-[10px] px-1 bg-white/10 rounded">{autoplayEnabled ? 'ON' : 'OFF'}</span>
+                        </button>
+
+                        {/* Format selector for offline conversion */}
+                        <div className="flex items-center gap-1.5 bg-white/5 border border-white/10 rounded-full px-2 py-0.5">
+                          <span className="text-[10px] text-slate-400 pl-1 font-semibold">Format:</span>
+                          <select 
+                            value={selectedFormat?.token || ''}
+                            onChange={(e) => {
+                              const token = e.target.value;
+                              const matches = [...videoFormats, ...audioFormats];
+                              const found = matches.find(f => f.token === token);
+                              if (found) handleConvert(watchDetails.id).then(() => handleStartConversion(found));
+                            }}
+                            className="bg-transparent text-xs font-semibold text-slate-200 py-1 focus:outline-none cursor-pointer"
+                          >
+                            <option value="" disabled>Select conversion quality...</option>
+                            <optgroup label="Video (MP4)">
+                              {videoFormats.map((f) => (
+                                <option key={f.token} value={f.token}>{f.quality}p (.mp4)</option>
+                              ))}
+                            </optgroup>
+                            <optgroup label="Audio (MP3)">
+                              {audioFormats.map((f) => (
+                                <option key={f.token} value={f.token}>{f.quality}kbps (.mp3)</option>
+                              ))}
+                            </optgroup>
+                          </select>
+                        </div>
+
+                        {/* Download offline action */}
+                        {selectedFormat && (
+                          <button
+                            onClick={handleSaveToBrowser}
+                            disabled={isSavingToBrowser || isSavedToBrowser}
+                            className={`p-2 rounded-full transition cursor-pointer border ${
+                              isSavedToBrowser 
+                                ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-400' 
+                                : 'bg-white/5 border-white/10 text-slate-300 hover:text-white active:scale-95'
+                            }`}
+                            title={isSavedToBrowser ? "Saved to browser offline library" : "Save offline to browser storage"}
+                          >
+                            {isSavingToBrowser ? (
+                              <div className="w-5 h-5 border-2 border-slate-300 border-t-transparent rounded-full animate-spin" />
+                            ) : (
+                              <Library className="w-4.5 h-4.5" />
+                            )}
+                          </button>
+                        )}
+                        
+                        {selectedFormat && downloadUrl && (
+                          <button
+                            onClick={handleDownload}
+                            className="p-2 bg-rose-600 hover:bg-rose-700 text-white rounded-full transition cursor-pointer active:scale-95 border border-rose-500/20"
+                            title="Download file to computer"
+                          >
+                            <Download className="w-4.5 h-4.5" />
+                          </button>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Progress feedback */}
+                    {status === 'converting' && (
+                      <div className="p-3 bg-white/5 rounded-xl border border-white/10 flex items-center justify-between gap-4">
+                        <div className="flex-1 flex flex-col gap-1">
+                          <span className="text-xs text-slate-400 font-semibold">Background conversion running...</span>
+                          <div className="h-1.5 w-full bg-white/10 rounded-full overflow-hidden">
+                            <div className="bg-rose-500 h-full transition-all duration-300" style={{ width: `${progress}%` }} />
+                          </div>
+                        </div>
+                        <span className="text-xs font-bold font-mono text-rose-400">{progress}%</span>
+                      </div>
+                    )}
+
+                    {saveError && (
+                      <div className="p-3 bg-rose-500/15 border border-rose-500/20 rounded-xl text-xs text-rose-400">
+                        {saveError}
+                      </div>
+                    )}
+
+                    {/* Collapsible description box */}
+                    <div className="bg-white/5 rounded-2xl p-4 flex flex-col border border-white/5">
+                      <div className="flex items-center gap-3 text-xs font-semibold text-slate-300 select-none">
+                        <span>{formatViewCount(watchDetails.statistics?.viewCount)}</span>
+                        <span>•</span>
+                        <span>{getRelativeTime(watchDetails.snippet?.publishedAt)}</span>
+                      </div>
+                      
+                      <div className={`text-sm text-slate-200 mt-2 whitespace-pre-line leading-relaxed ${
+                        descExpanded ? '' : 'line-clamp-3'
+                      }`}>
+                        {watchDetails.snippet?.description}
+                      </div>
+
+                      <button
+                        onClick={() => setDescExpanded(!descExpanded)}
+                        className="text-xs font-bold text-slate-300 hover:text-white mt-2 flex items-center gap-1 self-start cursor-pointer hover:underline"
+                      >
+                        {descExpanded ? (
+                          <><span>Show Less</span><ChevronUp className="w-3.5 h-3.5" /></>
+                        ) : (
+                          <><span>Show More</span><ChevronDown className="w-3.5 h-3.5" /></>
+                        )}
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {/* Comments Thread Section */}
+                <div className="mt-4 flex flex-col gap-4">
+                  <h3 className="text-sm font-bold text-white border-b border-white/5 pb-2 select-none">
+                    Comments ({watchComments.length})
+                  </h3>
+
+                  <div className="flex flex-col gap-4">
+                    {watchComments.map((thread) => {
+                      const comment = thread.snippet?.topLevelComment?.snippet;
+                      const replyComments = thread.replies?.comments || [];
+                      const isExpanded = expandedComments[thread.id];
+                      
+                      if (!comment) return null;
+                      return (
+                        <div key={thread.id} className="flex gap-3 text-sm">
+                          {/* Profile Avatar */}
+                          <img 
+                            src={comment.authorProfileImageUrl || 'https://img.youtube.com'} 
+                            alt="author avatar"
+                            className="w-9 h-9 rounded-full bg-slate-800 border border-white/5 shrink-0 object-cover"
+                            onError={(e) => {
+                              e.target.style.display = 'none';
+                            }}
+                          />
+
+                          <div className="flex flex-col min-w-0 flex-1">
+                            {/* Author row */}
+                            <div className="flex items-center gap-2 select-none">
+                              <span className="font-bold text-white text-xs truncate">
+                                {comment.authorDisplayName}
+                              </span>
+                              <span className="text-[10px] text-slate-500">
+                                {getRelativeTime(comment.publishedAt)}
+                              </span>
+                            </div>
+
+                            {/* Comment text */}
+                            <p className="text-slate-300 text-xs mt-1 whitespace-pre-wrap leading-normal">
+                              {comment.textDisplay}
+                            </p>
+
+                            {/* Like count */}
+                            <div className="flex items-center gap-1.5 text-slate-500 text-[10px] mt-2 select-none">
+                              <ThumbsUp className="w-3.5 h-3.5" />
+                              <span>{comment.likeCount || 0}</span>
+                            </div>
+
+                            {/* Replies expander */}
+                            {replyComments.length > 0 && (
+                              <div className="mt-2.5">
+                                <button
+                                  onClick={() => setExpandedComments(prev => ({ ...prev, [thread.id]: !isExpanded }))}
+                                  className="text-xs font-bold text-rose-400 hover:text-rose-300 flex items-center gap-1 cursor-pointer select-none"
+                                >
+                                  {isExpanded ? (
+                                    <><span>Hide replies</span><ChevronUp className="w-3.5 h-3.5" /></>
+                                  ) : (
+                                    <><span>Show replies ({replyComments.length})</span><ChevronDown className="w-3.5 h-3.5" /></>
+                                  )}
+                                </button>
+
+                                {/* Render replies */}
+                                {isExpanded && (
+                                  <div className="flex flex-col gap-3 mt-3 pl-4 border-l border-white/5">
+                                    {replyComments.map((reply) => (
+                                      <div key={reply.id} className="flex gap-2 text-xs">
+                                        <img 
+                                          src={reply.snippet?.authorProfileImageUrl} 
+                                          alt="avatar"
+                                          className="w-7 h-7 rounded-full bg-slate-800 object-cover shrink-0"
+                                        />
+                                        <div className="flex flex-col min-w-0 flex-1">
+                                          <div className="flex items-center gap-2">
+                                            <span className="font-bold text-white text-[11px] truncate">
+                                              {reply.snippet?.authorDisplayName}
+                                            </span>
+                                            <span className="text-[9px] text-slate-500">
+                                              {getRelativeTime(reply.snippet?.publishedAt)}
+                                            </span>
+                                          </div>
+                                          <p className="text-slate-300 text-xs mt-0.5 leading-normal">
+                                            {reply.snippet?.textDisplay}
+                                          </p>
+                                        </div>
+                                      </div>
+                                    ))}
+                                  </div>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+
+                    {/* Load more comments button */}
+                    {watchCommentsToken && (
+                      <button
+                        onClick={loadMoreComments}
+                        className="text-xs font-bold text-slate-400 hover:text-white cursor-pointer self-center py-2"
+                      >
+                        Load More Comments
+                      </button>
+                    )}
                   </div>
                 </div>
               </div>
+
+              {/* Right Column: Recommended Sidebar list */}
+              <div className="flex flex-col gap-4">
+                <h3 className="text-sm font-bold text-white select-none">
+                  Recommended Videos
+                </h3>
+                <div className="flex flex-col gap-3">
+                  {feedVideos.filter(v => v.id !== route.videoId).slice(0, 10).map((video) => (
+                    <div 
+                      key={video.id} 
+                      onClick={() => navigate('watch', { v: video.id })}
+                      className="flex gap-2.5 group cursor-pointer"
+                    >
+                      <div className="relative w-40 aspect-video rounded-lg overflow-hidden bg-slate-900 border border-white/5 shrink-0">
+                        <img 
+                          src={video.snippet?.thumbnails?.medium?.url || 'https://img.youtube.com/vi/dQw4w9WgXcQ/mqdefault.jpg'} 
+                          alt={video.snippet?.title}
+                          className="w-full h-full object-cover group-hover:scale-105 transition duration-200"
+                          loading="lazy"
+                        />
+                        {video.contentDetails?.duration && (
+                          <div className="absolute bottom-1 right-1 bg-black/85 text-[9px] font-bold text-white px-1 py-0.2 rounded font-mono">
+                            {formatISO8601Duration(video.contentDetails.duration)}
+                          </div>
+                        )}
+                      </div>
+                      
+                      <div className="flex flex-col min-w-0">
+                        <span className="text-xs font-bold text-white leading-tight line-clamp-2 group-hover:text-rose-400 transition" title={video.snippet?.title}>
+                          {video.snippet?.title}
+                        </span>
+                        <span className="text-[10px] text-slate-400 mt-1 truncate">
+                          {video.snippet?.channelTitle}
+                        </span>
+                        <div className="flex items-center gap-1 text-[9px] text-slate-500 mt-0.5 select-none">
+                          <span>{formatViewCount(video.statistics?.viewCount)}</span>
+                          <span>•</span>
+                          <span>{getRelativeTime(video.snippet?.publishedAt)}</span>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
             </div>
-          </div>
-        </div>
-      )}
+          )}
+
+          {/* ====================================================
+              ROUTE: OFFLINE LIBRARY
+              ==================================================== */}
+          {route.name === 'library' && (
+            <div className="flex flex-col gap-4">
+              <div className="flex items-center justify-between border-b border-white/5 pb-2 select-none">
+                <h1 className="text-lg font-bold text-white flex items-center gap-2">
+                  <Library className="w-5 h-5 text-rose-500" />
+                  <span>Offline Browser Library</span>
+                </h1>
+                <span className="text-xs text-slate-400">
+                  {history.filter(item => item.savedInBrowser).length} items offlined
+                </span>
+              </div>
+
+              {history.filter(item => item.savedInBrowser).length === 0 ? (
+                <div className="flex flex-col items-center justify-center p-12 text-slate-500 gap-3 border border-dashed border-white/10 rounded-2xl mt-4">
+                  <Library className="w-12 h-12 stroke-[1]" />
+                  <p className="text-sm">No videos or audio saved offline yet.</p>
+                  <button 
+                    onClick={() => navigate('home')}
+                    className="mt-2 px-4 py-2 bg-rose-600 hover:bg-rose-700 text-white rounded-full text-xs font-bold transition cursor-pointer"
+                  >
+                    Browse Feed to Save Videos
+                  </button>
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-x-4 gap-y-8 mt-2">
+                  {history.filter(item => item.savedInBrowser).map((item) => {
+                    const storageId = `${item.id}-${item.quality}-${item.ext}`;
+                    return (
+                      <div 
+                        key={storageId}
+                        className="flex flex-col gap-2.5 group relative"
+                      >
+                        {/* Play click wrapper */}
+                        <div 
+                          onClick={() => navigate('watch', { v: item.id })}
+                          className="relative aspect-video rounded-xl overflow-hidden bg-slate-900 border border-white/5 shadow-md cursor-pointer"
+                        >
+                          <OfflineThumbnail 
+                            storageId={storageId} 
+                            fallbackId={item.id} 
+                            className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+                          />
+                          {/* Duration Badge */}
+                          <div className="absolute bottom-2 right-2 bg-black/85 text-[10px] font-bold text-white px-1.5 py-0.5 rounded font-mono">
+                            {formatTime(item.duration)}
+                          </div>
+                          
+                          {/* Offline Badge */}
+                          <div className="absolute top-2 left-2 bg-emerald-500 text-black text-[9px] font-extrabold px-1.5 py-0.5 rounded shadow">
+                            OFFLINE
+                          </div>
+
+                          {/* Media Type Badge */}
+                          <div className="absolute top-2 right-2 bg-rose-600 text-white text-[9px] font-bold px-1.5 py-0.5 rounded shadow uppercase">
+                            {item.ext}
+                          </div>
+                        </div>
+
+                        {/* Title metadata */}
+                        <div className="flex flex-col min-w-0 px-1">
+                          <span 
+                            onClick={() => navigate('watch', { v: item.id })}
+                            className="text-sm font-semibold text-white leading-tight line-clamp-2 hover:text-rose-400 transition cursor-pointer"
+                          >
+                            {item.title}
+                          </span>
+                          
+                          <div className="flex items-center justify-between mt-2">
+                            <span className="text-[10px] text-slate-500 font-medium">
+                              Quality: {item.quality}{item.ext === 'mp3' ? 'kbps' : 'p'}
+                            </span>
+                            
+                            <button
+                              onClick={() => handleDeleteFromBrowser(item)}
+                              className="text-[10px] font-bold text-rose-400 hover:text-rose-300 hover:underline cursor-pointer transition select-none"
+                            >
+                              Remove Offline
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* ====================================================
+              ROUTE: WATCH HISTORY
+              ==================================================== */}
+          {route.name === 'history' && (
+            <div className="flex flex-col gap-4">
+              <div className="flex items-center justify-between border-b border-white/5 pb-2 select-none">
+                <h1 className="text-lg font-bold text-white flex items-center gap-2">
+                  <Clock className="w-5 h-5 text-rose-500" />
+                  <span>Conversion & Watch History</span>
+                </h1>
+                
+                {history.length > 0 && (
+                  <button
+                    onClick={clearHistory}
+                    className="text-xs font-bold text-rose-400 hover:text-rose-300 hover:underline cursor-pointer"
+                  >
+                    Clear History
+                  </button>
+                )}
+              </div>
+
+              {history.length === 0 ? (
+                <div className="flex flex-col items-center justify-center p-12 text-slate-500 gap-3 border border-dashed border-white/10 rounded-2xl mt-4">
+                  <Clock className="w-12 h-12 stroke-[1]" />
+                  <p className="text-sm">Your history is currently empty.</p>
+                </div>
+              ) : (
+                <div className="flex flex-col gap-3.5 mt-2 max-w-4xl">
+                  {history.map((item) => {
+                    const storageId = `${item.id}-${item.quality}-${item.ext}`;
+                    const isSaving = savingIds.includes(storageId);
+                    return (
+                      <div 
+                        key={storageId}
+                        className="bg-white/5 border border-white/5 hover:border-white/10 rounded-2xl p-4 flex gap-4 items-center justify-between"
+                      >
+                        {/* Title and metadata */}
+                        <div className="flex items-center gap-4 min-w-0">
+                          {/* Mini Thumbnail */}
+                          <div 
+                            onClick={() => navigate('watch', { v: item.id })}
+                            className="relative w-28 aspect-video rounded-lg overflow-hidden shrink-0 cursor-pointer bg-slate-900 border border-white/5"
+                          >
+                            <OfflineThumbnail storageId={storageId} fallbackId={item.id} className="w-full h-full object-cover" />
+                            <div className="absolute bottom-1 right-1 bg-black/85 text-[8px] font-bold text-white px-1.5 py-0.2 rounded font-mono">
+                              {formatTime(item.duration)}
+                            </div>
+                          </div>
+
+                          <div className="flex flex-col min-w-0">
+                            <h3 
+                              onClick={() => navigate('watch', { v: item.id })}
+                              className="text-sm font-semibold text-white leading-tight truncate hover:text-rose-400 cursor-pointer"
+                              title={item.title}
+                            >
+                              {item.title}
+                            </h3>
+                            <span className="text-[10px] text-slate-500 mt-1 select-none">
+                              {item.quality}{item.ext === 'mp3' ? 'kbps' : 'p'} • {item.ext.toUpperCase()} • {item.downloadedAt}
+                            </span>
+                          </div>
+                        </div>
+
+                        {/* Actions */}
+                        <div className="flex items-center gap-2">
+                          {item.savedInBrowser ? (
+                            <div className="px-2.5 py-1 bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 rounded-full text-[10px] font-extrabold select-none">
+                              OFFLINE
+                            </div>
+                          ) : (
+                            <button
+                              onClick={() => handleSaveHistoryItemToBrowser(item)}
+                              disabled={isSaving}
+                              className="px-3 py-1 bg-white/5 hover:bg-white/10 text-slate-300 hover:text-white rounded-full text-xs font-semibold cursor-pointer border border-white/5 transition"
+                            >
+                              {isSaving ? 'Saving...' : 'Save Offline'}
+                            </button>
+                          )}
+
+                          <button
+                            onClick={() => deleteHistoryItem(item)}
+                            className="p-2 text-slate-400 hover:text-rose-400 rounded-full hover:bg-white/5 cursor-pointer transition"
+                            title="Delete from history"
+                          >
+                            <X className="w-4.5 h-4.5" />
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* ====================================================
+              ROUTE: SETTINGS
+              ==================================================== */}
+          {route.name === 'settings' && (
+            <div className="max-w-2xl flex flex-col gap-6">
+              <h1 className="text-lg font-bold text-white border-b border-white/5 pb-2 flex items-center gap-2 select-none">
+                <Settings className="w-5 h-5 text-rose-500" />
+                <span>TubeHub Settings</span>
+              </h1>
+
+              {/* API Key Form */}
+              <form onSubmit={handleSaveApiKey} className="bg-white/5 p-6 rounded-2xl border border-white/5 flex flex-col gap-4">
+                <div className="flex flex-col gap-1.5">
+                  <h3 className="text-sm font-bold text-white">YouTube Data API v3 Key</h3>
+                  <p className="text-xs text-slate-400 leading-normal">
+                    This application can use your own custom YouTube Data API key to fetch searches and trending categories. 
+                    If left blank, the app will fall back to using the developer's server-side key configured in the backend environment.
+                  </p>
+                </div>
+
+                <div className="flex gap-2 mt-2">
+                  <input
+                    type="password"
+                    placeholder="Enter YouTube API Key..."
+                    value={apiKeyInput}
+                    onChange={(e) => setApiKeyInput(e.target.value)}
+                    className="flex-1 bg-slate-900 border border-white/10 rounded-xl px-4 py-2 text-sm text-slate-100 placeholder:text-slate-500 focus:outline-none focus:border-rose-500/50"
+                  />
+                  <button
+                    type="submit"
+                    className="px-5 bg-rose-600 hover:bg-rose-700 text-white rounded-xl text-sm font-bold transition cursor-pointer active:scale-95 border border-rose-500/20"
+                  >
+                    Save Key
+                  </button>
+                </div>
+
+                {localStorage.getItem('yt-api-key') && (
+                  <button
+                    type="button"
+                    onClick={handleClearApiKey}
+                    className="text-xs font-bold text-rose-400 hover:text-rose-300 self-start hover:underline cursor-pointer select-none"
+                  >
+                    Clear custom key & use Server Fallback
+                  </button>
+                )}
+              </form>
+
+              {/* Developer note */}
+              <div className="bg-white/5 p-6 rounded-2xl border border-white/5 flex flex-col gap-2">
+                <h3 className="text-sm font-bold text-white">Privacy & Cache Policy</h3>
+                <p className="text-xs text-slate-400 leading-relaxed">
+                  TubeHub operates with a strict <strong>privacy-first</strong> protocol:
+                </p>
+                <ul className="text-xs text-slate-400 list-disc list-inside flex flex-col gap-1.5 mt-1 leading-relaxed">
+                  <li>No client IP exposure to Google CDNs (all video streams are proxied anonymously through our Node.js server).</li>
+                  <li>No personalized feed tracking or persistent tracking cookies are stored.</li>
+                  <li>Video playback is cached locally in the background, minimizing bandwidth consumption on repeated watches or downloads.</li>
+                  <li>Stale media cache files in the container are automatically deleted based on the background cleanup threshold (configured in `.env`).</li>
+                </ul>
+              </div>
+            </div>
+          )}
+
+        </main>
+      </div>
     </div>
   );
 }

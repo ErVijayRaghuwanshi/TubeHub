@@ -264,8 +264,19 @@ export function useYoutubeConverter() {
     try {
       const blob = await fetchBlobWithProxy(downloadUrl);
       const storageId = `${currentVideo.id}-${selectedFormat.quality}-${selectedFormat.ext}`;
-      
       await saveMedia(storageId, blob);
+
+      // Also save thumbnail blob offline
+      try {
+        const thumbnailUrl = `https://img.youtube.com/vi/${currentVideo.id}/mqdefault.jpg`;
+        const thumbnailBlob = await fetchBlobWithProxy(thumbnailUrl).catch(() => null);
+        if (thumbnailBlob) {
+          await saveMedia(`${storageId}-thumbnail`, thumbnailBlob);
+        }
+      } catch (thumbErr) {
+        console.warn('Failed to save thumbnail offline:', thumbErr);
+      }
+
       setIsSavedToBrowser(true);
 
       // Add to history (marking as saved in browser)
@@ -310,6 +321,11 @@ export function useYoutubeConverter() {
     try {
       const storageId = `${item.id}-${item.quality}-${item.ext}`;
       await deleteMedia(storageId);
+      try {
+        await deleteMedia(`${storageId}-thumbnail`);
+      } catch (thumbErr) {
+        console.warn('Failed to delete offline thumbnail:', thumbErr);
+      }
       
       setHistory(prev => prev.map(histItem => {
         if (histItem.id === item.id && histItem.ext === item.ext && histItem.quality === item.quality) {
@@ -331,6 +347,17 @@ export function useYoutubeConverter() {
       const blob = await fetchBlobWithProxy(item.downloadUrl);
       const storageId = `${item.id}-${item.quality}-${item.ext}`;
       await saveMedia(storageId, blob);
+
+      // Also save thumbnail blob offline
+      try {
+        const thumbnailUrl = `https://img.youtube.com/vi/${item.id}/mqdefault.jpg`;
+        const thumbnailBlob = await fetchBlobWithProxy(thumbnailUrl).catch(() => null);
+        if (thumbnailBlob) {
+          await saveMedia(`${storageId}-thumbnail`, thumbnailBlob);
+        }
+      } catch (thumbErr) {
+        console.warn('Failed to save thumbnail offline:', thumbErr);
+      }
 
       setHistory(prev => prev.map(histItem => {
         if (histItem.id === item.id && histItem.ext === item.ext && histItem.quality === item.quality) {
@@ -393,6 +420,7 @@ export function useYoutubeConverter() {
       const storageId = `${itemToDelete.id}-${itemToDelete.quality}-${itemToDelete.ext}`;
       try {
         await deleteMedia(storageId);
+        await deleteMedia(`${storageId}-thumbnail`);
       } catch (e) {
         console.error('Failed to delete media from browser storage during item deletion:', e);
       }
@@ -409,6 +437,7 @@ export function useYoutubeConverter() {
         const storageId = `${item.id}-${item.quality}-${item.ext}`;
         try {
           await deleteMedia(storageId);
+          await deleteMedia(`${storageId}-thumbnail`);
         } catch (e) {}
       }
     }
