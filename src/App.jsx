@@ -326,7 +326,7 @@ export default function App() {
       setVideoIsPlaying(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [route.name, route.videoId, loadWatchDetails]);
+  }, [route.name, route.videoId]);
 
 
   // Autoplay next video implementation
