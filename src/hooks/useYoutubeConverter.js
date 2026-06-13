@@ -118,7 +118,10 @@ export function useYoutubeConverter() {
       return;
     }
 
-    const videoId = isValidYoutubeUrl(activeUrl);
+    const videoId = /^[a-zA-Z0-9_-]{11}$/.test(activeUrl)
+      ? activeUrl
+      : isValidYoutubeUrl(activeUrl);
+
     if (!videoId) {
       setErrorMsg('Invalid YouTube URL. Please check the link and try again.');
       setStatus('error');
