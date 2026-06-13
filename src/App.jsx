@@ -101,7 +101,11 @@ export default function App() {
     }
     
     window.history.pushState({}, '', `${path}${search}`);
-    setRoute({ name: pageName, ...params });
+    const routeParams = { ...params };
+    if (pageName === 'watch' && params.v) {
+      routeParams.videoId = params.v;
+    }
+    setRoute({ name: pageName, ...routeParams });
   };
 
   useEffect(() => {

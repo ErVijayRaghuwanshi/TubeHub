@@ -205,7 +205,7 @@ app.get('/api/v5/stream/:videoId', async (req, res) => {
       console.log(`Stating background cache download for video: ${videoId}`);
       const flags = {
         output: cachePath,
-        format: 'best',
+        format: 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
         noCheckCertificates: true,
         noWarnings: true
       };
@@ -229,7 +229,7 @@ app.get('/api/v5/stream/:videoId', async (req, res) => {
     const videoUrl = `https://www.youtube.com/watch?v=${videoId}`;
     const streamUrl = await youtubedl(videoUrl, {
       getUrl: true,
-      format: 'best',
+      format: 'best[ext=mp4]/best',
       noCheckCertificates: true,
       noWarnings: true
     });
