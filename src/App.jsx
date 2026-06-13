@@ -961,14 +961,24 @@ export default function App() {
                           >
                             <option value="" disabled>Select conversion quality...</option>
                             <optgroup label="Video (MP4)">
-                              {videoFormats.map((f) => (
-                                <option key={f.token} value={f.token}>{f.quality}p (.mp4)</option>
-                              ))}
+                              {videoFormats.map((f) => {
+                                const isCached = history.some(item => item.id === watchDetails.id && item.ext === f.ext && item.quality === f.quality && item.savedInBrowser);
+                                return (
+                                  <option key={f.token} value={f.token}>
+                                    {f.quality}p (.mp4){isCached ? ' (Saved Offline)' : ''}
+                                  </option>
+                                );
+                              })}
                             </optgroup>
                             <optgroup label="Audio (MP3)">
-                              {audioFormats.map((f) => (
-                                <option key={f.token} value={f.token}>{f.quality}kbps (.mp3)</option>
-                              ))}
+                              {audioFormats.map((f) => {
+                                const isCached = history.some(item => item.id === watchDetails.id && item.ext === f.ext && item.quality === f.quality && item.savedInBrowser);
+                                return (
+                                  <option key={f.token} value={f.token}>
+                                    {f.quality}kbps (.mp3){isCached ? ' (Saved Offline)' : ''}
+                                  </option>
+                                );
+                              })}
                             </optgroup>
                           </select>
                         </div>
