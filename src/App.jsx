@@ -1,4 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
+import * as dashjs from 'dashjs';
 import { useYoutubeConverter } from './hooks/useYoutubeConverter';
 import { fetchTrending, searchVideos, fetchVideoDetails } from './services/youtube';
 import { getMedia, getMediaSizeEstimate, clearAllStorage } from './services/db';
@@ -215,6 +216,75 @@ export default function App() {
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [isDraggingVideoTimeline, setIsDraggingVideoTimeline] = useState(false);
 
+  const dashPlayerRef = useRef(null);
+  const lastVideoIdRef = useRef(null);
+
+  // App-level unmount cleanup
+  useEffect(() => {
+    return () => {
+      if (dashPlayerRef.current) {
+        console.log('App unmount: destroying dash.js player instance');
+        dashPlayerRef.current.destroy();
+        dashPlayerRef.current = null;
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!videoRef.current) return;
+
+    if (!activePlayItem) {
+      if (dashPlayerRef.current) {
+        console.log('Destroying active dash.js player instance');
+        dashPlayerRef.current.destroy();
+        dashPlayerRef.current = null;
+      }
+      lastVideoIdRef.current = null;
+      videoRef.current.src = '';
+      videoRef.current.load();
+      return;
+    }
+
+    const isDash = activePlayItem.src.endsWith('/manifest.mpd') || activePlayItem.src.includes('manifest.mpd');
+
+    if (isDash) {
+      // If player already exists and we are playing the same video ID, just attach the new quality manifest URL
+      if (dashPlayerRef.current && lastVideoIdRef.current === activePlayItem.id) {
+        console.log('Switching quality on existing dash.js player instance:', activePlayItem.src);
+        dashPlayerRef.current.attachSource(activePlayItem.src);
+        return;
+      }
+
+      // If playing a different video ID, destroy the player first to avoid stream bleeding
+      if (dashPlayerRef.current) {
+        console.log('Destroying dash.js player instance for video ID transition');
+        dashPlayerRef.current.destroy();
+        dashPlayerRef.current = null;
+      }
+
+      console.log('Initializing dash.js media player for source:', activePlayItem.src);
+      const player = dashjs.MediaPlayer().create();
+      player.initialize(videoRef.current, activePlayItem.src, true);
+      dashPlayerRef.current = player;
+      lastVideoIdRef.current = activePlayItem.id;
+    } else {
+      if (dashPlayerRef.current) {
+        console.log('Destroying active dash.js player instance to play progressive source');
+        dashPlayerRef.current.destroy();
+        dashPlayerRef.current = null;
+      }
+      lastVideoIdRef.current = null;
+      console.log('Using native player for progressive source:', activePlayItem.src);
+      
+      const prevSrc = videoRef.current.src;
+      const absoluteNewSrc = activePlayItem.src ? new URL(activePlayItem.src, window.location.href).href : '';
+      if (prevSrc !== absoluteNewSrc) {
+        videoRef.current.src = activePlayItem.src;
+        videoRef.current.load();
+      }
+    }
+  }, [activePlayItem?.src, activePlayItem?.id]);
+
   const saveResumePosition = useCallback((videoId, time) => {
     try {
       const stored = localStorage.getItem('tubehub_resume_positions');
@@ -330,6 +400,18 @@ export default function App() {
       return `${hours}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
     }
     return `${minutes}:${seconds.toString().padStart(2, '0')}`;
+  };
+
+  // Helper to parse ISO8601 duration to seconds
+  const parseISO8601ToSeconds = (isoDuration) => {
+    if (!isoDuration) return 0;
+    if (!isNaN(isoDuration)) return parseInt(isoDuration, 10);
+    const match = isoDuration.match(/PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?/);
+    if (!match) return 0;
+    const hours = parseInt(match[1]) || 0;
+    const minutes = parseInt(match[2]) || 0;
+    const seconds = parseInt(match[3]) || 0;
+    return hours * 3600 + minutes * 60 + seconds;
   };
 
   // Helper to format view numbers (e.g. 1000000 to 1M views)
@@ -507,15 +589,28 @@ export default function App() {
       } else {
         console.log('Resolving watch player to privacy-first backend stream proxy.');
         const lastExt = localStorage.getItem('tubehub_last_ext') || 'mp4';
-        const lastQuality = localStorage.getItem('tubehub_last_quality') || '720';
+        let lastQuality = localStorage.getItem('tubehub_last_quality') || '720';
         const cacheEnabled = localStorage.getItem('tubehub_enable_backend_cache') === 'true';
+
+        // If cache is disabled, downgrade requested video quality to 720p maximum
+        if (lastExt === 'mp4' && parseInt(lastQuality, 10) > 720 && !cacheEnabled) {
+          lastQuality = '720';
+        }
+
+        const durationStr = details?.contentDetails?.duration || histItem?.duration || '0';
+        const durationSecs = parseISO8601ToSeconds(durationStr);
+        const isCachedOnServer = (histItem?.ext === lastExt && String(histItem?.quality) === String(lastQuality) && histItem?.isCached) || false;
+
         setActivePlayItem({
           title: details?.snippet?.title || histItem?.title || 'Streaming Video',
           ext: lastExt,
           quality: lastQuality,
-          src: `/api/v5/stream/${videoId}?ext=${lastExt}&quality=${lastQuality}&cache=${cacheEnabled}`,
+          src: lastExt === 'mp4' && (cacheEnabled || isCachedOnServer)
+            ? `/api/v5/stream/${videoId}/${lastQuality}/manifest.mpd?duration=${durationSecs}&cache=${cacheEnabled}`
+            : `/api/v5/stream/${videoId}?ext=${lastExt}&quality=${lastQuality}&cache=${cacheEnabled}`,
           id: videoId,
-          isOffline: false
+          isOffline: false,
+          duration: durationSecs
         });
       }
 
@@ -544,7 +639,7 @@ export default function App() {
   // Poll backend cache status for active video stream (acts as active play heartbeat)
   useEffect(() => {
     const cacheEnabled = localStorage.getItem('tubehub_enable_backend_cache') === 'true';
-    if (route.name !== 'watch' || !activePlayItem || activePlayItem.isOffline || !cacheEnabled) {
+    if (route.name !== 'watch' || !activePlayItem || activePlayItem.isOffline) {
       // eslint-disable-next-line react-hooks/set-state-in-effect
       setServerCacheProgress(0);
       startedAsUncachedRef.current = false;
@@ -575,7 +670,7 @@ export default function App() {
             setVideoFormats(prev => prev.map(f => String(f.quality) === String(activePlayItem.quality) && f.ext === activePlayItem.ext ? { ...f, isCached: true } : f));
 
             // Force player reload only if it transitioned from uncached to cached during this session
-            if (startedAsUncachedRef.current && videoRef.current) {
+            if (startedAsUncachedRef.current && videoRef.current && cacheEnabled) {
               startedAsUncachedRef.current = false; // Reset to prevent double reload
               const currentTime = videoRef.current.currentTime;
               const isPlaying = !videoRef.current.paused;
@@ -622,12 +717,17 @@ export default function App() {
     if (
       route.name === 'watch' &&
       selectedFormat &&
+      selectedFormat.token.endsWith(`-${route.videoId}`) &&
       activePlayItem &&
       !activePlayItem.isOffline &&
       activePlayItem.id === route.videoId
     ) {
       const cacheEnabled = localStorage.getItem('tubehub_enable_backend_cache') === 'true';
-      const newSrc = `/api/v5/stream/${route.videoId}?ext=${selectedFormat.ext}&quality=${selectedFormat.quality}&cache=${cacheEnabled}`;
+      const durationSecs = activePlayItem.duration || 0;
+      const isCached = selectedFormat.isCached || false;
+      const newSrc = selectedFormat.ext === 'mp4' && (cacheEnabled || isCached)
+        ? `/api/v5/stream/${route.videoId}/${selectedFormat.quality}/manifest.mpd?duration=${durationSecs}&cache=${cacheEnabled}`
+        : `/api/v5/stream/${route.videoId}?ext=${selectedFormat.ext}&quality=${selectedFormat.quality}&cache=${cacheEnabled}`;
       if (activePlayItem.src !== newSrc) {
         // eslint-disable-next-line react-hooks/set-state-in-effect
         setActivePlayItem(prev => {
@@ -992,6 +1092,9 @@ export default function App() {
     return `${(mb / 1024).toFixed(2)} GB`;
   };
 
+  const activeFormat = selectedFormat && watchDetails && selectedFormat.token.endsWith(`-${watchDetails.id}`) ? selectedFormat : null;
+  const activeIsSavedToBrowser = activeFormat ? isSavedToBrowser : false;
+
   return (
     <div className="min-h-screen bg-[#0f0f0f] text-slate-100 flex flex-col font-sans antialiased selection:bg-rose-600/35 selection:text-white">
       {/* --- HEADER --- */}
@@ -1265,7 +1368,7 @@ export default function App() {
                   >
                     <video 
                       ref={videoRef}
-                      src={activePlayItem.src} 
+                      src={(activePlayItem && (activePlayItem.src.includes('manifest.mpd') || activePlayItem.src.endsWith('/manifest.mpd'))) ? undefined : activePlayItem.src} 
                       autoPlay 
                       autoPictureInPicture={true}
                       poster={posterUrl || undefined}
@@ -1495,7 +1598,7 @@ export default function App() {
                           <span className="text-[10px] text-slate-400 pl-1 font-semibold">Format:</span>
                           <select 
                             id="watch-select-format"
-                            value={selectedFormat?.token || ''}
+                            value={activeFormat?.token || ''}
                             onChange={(e) => {
                               const token = e.target.value;
                               const matches = [...videoFormats, ...audioFormats];
@@ -1544,20 +1647,20 @@ export default function App() {
                         <button
                           id="watch-btn-save-offline"
                           onClick={() => handleSaveToBrowser()}
-                          disabled={!selectedFormat || isSavingToBrowser || (status === 'converting' && pendingAction === 'save') || isSavedToBrowser}
+                          disabled={!activeFormat || isSavingToBrowser || (status === 'converting' && pendingAction === 'save') || activeIsSavedToBrowser}
                           className={`p-2 rounded-full transition border relative flex items-center justify-center ${
-                            isSavedToBrowser 
+                            activeIsSavedToBrowser 
                               ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-400 cursor-default' 
-                              : !selectedFormat
+                              : !activeFormat
                                 ? 'opacity-40 border-white/5 text-slate-500 cursor-not-allowed'
                                 : (isSavingToBrowser || (status === 'converting' && pendingAction === 'save'))
                                   ? 'bg-white/5 border-white/5 text-slate-400 cursor-wait'
                                   : 'bg-white/5 border-white/10 text-slate-300 hover:text-white active:scale-95 cursor-pointer'
                           }`}
                           title={
-                            isSavedToBrowser 
+                            activeIsSavedToBrowser 
                               ? "Saved to browser offline library" 
-                              : !selectedFormat 
+                              : !activeFormat 
                                 ? "Select a format first to enable offline saving" 
                                 : (isSavingToBrowser || (status === 'converting' && pendingAction === 'save'))
                                   ? `Converting & saving in background (${progress}%)...` 
@@ -1602,16 +1705,16 @@ export default function App() {
                         <button
                           id="watch-btn-download"
                           onClick={() => handleDownload()}
-                          disabled={!selectedFormat || (status === 'converting' && pendingAction === 'download')}
+                          disabled={!activeFormat || (status === 'converting' && pendingAction === 'download')}
                           className={`p-2 rounded-full transition border relative flex items-center justify-center ${
-                            !selectedFormat 
+                            !activeFormat 
                               ? 'opacity-40 border-white/5 text-slate-500 cursor-not-allowed'
                               : (status === 'converting' && pendingAction === 'download')
                                 ? 'bg-white/5 border-white/5 text-slate-400 cursor-wait'
                                 : 'bg-rose-600 hover:bg-rose-700 text-white active:scale-95 cursor-pointer border-rose-500/20'
                           }`}
                           title={
-                            !selectedFormat 
+                            !activeFormat 
                               ? "Select a format first to enable downloading" 
                               : (status === 'converting' && pendingAction === 'download')
                                 ? `Converting & downloading in background (${progress}%)...` 

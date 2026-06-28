@@ -463,6 +463,208 @@ app.get('/api/v5/stream/:videoId', async (req, res) => {
   }
 });
 
+// Helper to wait for a file to exist and be fully written
+const waitForFile = async (filePath, timeoutMs = 12000) => {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    if (fs.existsSync(filePath)) {
+      try {
+        const size1 = fs.statSync(filePath).size;
+        await new Promise(r => setTimeout(r, 200));
+        const size2 = fs.statSync(filePath).size;
+        if (size1 === size2 && size1 > 0) {
+          return true;
+        }
+      } catch (e) {}
+    }
+    await new Promise(r => setTimeout(r, 300));
+  }
+  return false;
+};
+
+// DASH Streaming and segment delivery endpoint
+app.get('/api/v5/stream/:videoId/:quality/:filename', async (req, res) => {
+  const { videoId, quality, filename } = req.params;
+  const videoDir = getVideoDir(videoId);
+  const dashDir = path.join(videoDir, `dash_${quality}`);
+  const manifestPath = path.join(dashDir, 'manifest.mpd');
+  const cachePath = path.join(videoDir, `cache_${quality}.mp4`);
+  const jobKey = `${videoId}_${quality}_mp4`;
+
+  // 1. Handle DASH Manifest request
+  if (filename === 'manifest.mpd') {
+    res.setHeader('Content-Type', 'application/dash+xml');
+
+    // Case A: Video is fully cached
+    if (fs.existsSync(cachePath) && !cacheJobs[jobKey]) {
+      if (!fs.existsSync(manifestPath)) {
+        if (!fs.existsSync(dashDir)) {
+          fs.mkdirSync(dashDir, { recursive: true });
+        }
+        console.log(`Packaging cached video cache_${quality}.mp4 to DASH...`);
+        const cmd = `ffmpeg -y -i "${cachePath}" -c copy -f dash -use_template 1 -use_timeline 1 -init_seg_name 'init-stream$RepresentationID$.m4s' -media_seg_name 'chunk-stream$RepresentationID$-$Number$.m4s' "${manifestPath}"`;
+        await new Promise((resolve) => {
+          exec(cmd, (error, stdout, stderr) => {
+            if (error) {
+              console.error('Failed to segment cached video to DASH:', stderr);
+            }
+            resolve();
+          });
+        });
+      }
+
+      if (fs.existsSync(manifestPath)) {
+        return res.sendFile(manifestPath);
+      } else {
+        return res.status(500).send('Failed to generate DASH manifest.');
+      }
+    }
+
+    // Case B: Video is NOT cached (or cache is in progress)
+    let job = cacheJobs[jobKey];
+    if (!job) {
+      console.log(`Starting dynamic on-the-fly DASH generation for video: ${videoId}`);
+      const duration = parseInt(req.query.duration, 10) || 300;
+      const saveCacheOnComplete = req.query.cache !== 'false';
+
+      if (!fs.existsSync(dashDir)) {
+        fs.mkdirSync(dashDir, { recursive: true });
+      }
+
+      // Fetch YouTube stream URL
+      const videoUrl = `https://www.youtube.com/watch?v=${videoId}`;
+      const formatSelector = `bestvideo[height<=${quality}][ext=mp4]+bestaudio[ext=m4a]/best[height<=${quality}][ext=mp4]/best`;
+
+      let streamUrl;
+      try {
+        streamUrl = await youtubedl(videoUrl, {
+          ...getBaseYtdlOpts(),
+          getUrl: true,
+          format: formatSelector
+        });
+      } catch (err) {
+        console.error(`Failed to fetch stream URL for dynamic DASH generation: ${err}`);
+        return res.status(500).send('Could not fetch video stream.');
+      }
+
+      // Split streams if yt-dlp returns separate audio and video URLs
+      const urls = streamUrl.split('\n').map(u => u.trim()).filter(Boolean);
+      const ffmpegArgs = ['-y'];
+      
+      urls.forEach(url => {
+        ffmpegArgs.push('-i', url);
+      });
+
+      if (urls.length === 2) {
+        ffmpegArgs.push('-map', '0:v:0', '-map', '1:a:0');
+      }
+
+      ffmpegArgs.push(
+        '-c', 'copy',
+        '-f', 'dash',
+        '-use_template', '1',
+        '-use_timeline', '0',
+        '-init_seg_name', 'init-stream$RepresentationID$.m4s',
+        '-media_seg_name', 'chunk-stream$RepresentationID$-$Number$.m4s',
+        manifestPath
+      );
+
+      // Spawn ffmpeg to download and chunk into DASH segments
+      const ffmpegProcess = spawn('ffmpeg', ffmpegArgs);
+
+      job = {
+        child: ffmpegProcess,
+        progress: 0,
+        lastActive: Date.now(),
+        filename: manifestPath,
+        isDashJob: true,
+        duration: duration,
+        dashDir: dashDir,
+        cachePath: cachePath,
+        saveCacheOnComplete: saveCacheOnComplete
+      };
+      cacheJobs[jobKey] = job;
+
+      ffmpegProcess.stderr.on('data', (data) => {
+        const text = data.toString();
+        const match = text.match(/time=\s*(\d+):(\d+):(\d+(?:\.\d+)?)/);
+        if (match) {
+          const hours = parseInt(match[1], 10);
+          const minutes = parseInt(match[2], 10);
+          const seconds = parseFloat(match[3]);
+          const currentProgressSeconds = hours * 3600 + minutes * 60 + seconds;
+          const percentage = Math.min((currentProgressSeconds / duration) * 100, 99);
+          job.progress = percentage;
+        }
+      });
+
+      ffmpegProcess.on('close', (code) => {
+        console.log(`DASH generator process for ${jobKey} closed with code ${code}`);
+        const activeJob = cacheJobs[jobKey];
+        if (activeJob === job) {
+          delete cacheJobs[jobKey];
+        }
+
+        if (code === 0) {
+          if (job.saveCacheOnComplete) {
+            console.log(`Merging DASH segments to single MP4 cache file: ${cachePath}`);
+            const mergeCmd = `ffmpeg -y -i "${manifestPath}" -c copy "${cachePath}"`;
+            exec(mergeCmd, (error, stdout, stderr) => {
+              if (error) {
+                console.error(`Failed to merge DASH segments to ${cachePath}:`, stderr);
+                try { fs.unlinkSync(cachePath); } catch (e) {}
+              } else {
+                console.log(`Successfully created unified cache file: ${cachePath}`);
+              }
+            });
+          }
+        } else {
+          if (!fs.existsSync(cachePath)) {
+            try {
+              fs.rmSync(dashDir, { recursive: true, force: true });
+            } catch (e) {}
+          }
+        }
+      });
+    } else {
+      job.lastActive = Date.now();
+    }
+
+    const created = await waitForFile(manifestPath, 8000);
+    if (created) {
+      try {
+        const xml = fs.readFileSync(manifestPath, 'utf8');
+        const duration = job ? job.duration : (parseInt(req.query.duration, 10) || 300);
+        
+        let modifiedXml = xml.replace(/type="dynamic"/g, 'type="static"');
+        if (!modifiedXml.includes('mediaPresentationDuration=')) {
+          modifiedXml = modifiedXml.replace(/type="static"/g, `type="static" mediaPresentationDuration="PT${duration}S"`);
+        }
+        
+        res.setHeader('Content-Type', 'application/dash+xml');
+        return res.send(modifiedXml);
+      } catch (err) {
+        console.error('Failed to read and modify manifest:', err);
+        return res.sendFile(manifestPath);
+      }
+    } else {
+      return res.status(504).send('Timeout waiting for manifest creation.');
+    }
+  }
+
+  // 2. Handle DASH Segment requests (.m4s and init files)
+  const segmentPath = path.join(dashDir, filename);
+  const created = await waitForFile(segmentPath, 10000);
+  if (created) {
+    if (filename.endsWith('.m4s')) {
+      res.setHeader('Content-Type', 'video/iso.segment');
+    }
+    return res.sendFile(segmentPath);
+  } else {
+    return res.status(404).send(`Segment ${filename} not found or timeout.`);
+  }
+});
+
 // GET cache status/progress for a video (acts as heartbeat to keep background cache download alive)
 app.get('/api/v5/cache/status/:videoId', (req, res) => {
   const { videoId } = req.params;

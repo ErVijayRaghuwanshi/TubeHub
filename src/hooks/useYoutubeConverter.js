@@ -189,14 +189,26 @@ export function useYoutubeConverter() {
       
       // Auto-select last used format preference if available
       const lastExt = localStorage.getItem('tubehub_last_ext');
-      const lastQuality = localStorage.getItem('tubehub_last_quality');
+      let lastQuality = localStorage.getItem('tubehub_last_quality');
+      const cacheEnabled = localStorage.getItem('tubehub_enable_backend_cache') === 'true';
+
+      // If cache is disabled, downgrade video qualities above 720p
+      if (lastExt === 'mp4' && lastQuality && parseInt(lastQuality, 10) > 720 && !cacheEnabled) {
+        lastQuality = '720';
+      }
+
       let defaultFormat = null;
+      const matches = [...videos, ...audios];
       if (lastExt && lastQuality) {
-        const matches = [...videos, ...audios];
         defaultFormat = matches.find(f => f.ext === lastExt && String(f.quality) === String(lastQuality));
       }
       if (!defaultFormat) {
-        defaultFormat = videos.length > 0 ? videos[0] : (audios.length > 0 ? audios[0] : null);
+        // Fallback: select best video format <= 720p if cache is disabled, otherwise best video format
+        if (!cacheEnabled && videos.length > 0) {
+          defaultFormat = videos.find(f => f.quality <= 720) || videos[0];
+        } else {
+          defaultFormat = videos.length > 0 ? videos[0] : (audios.length > 0 ? audios[0] : null);
+        }
       }
       setSelectedFormat(defaultFormat);
 
