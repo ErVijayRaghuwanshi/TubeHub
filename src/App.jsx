@@ -141,7 +141,14 @@ export default function App() {
   }, []);
 
   // UI layout and search states
-  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [sidebarOpen, setSidebarOpen] = useState(() => {
+    const saved = localStorage.getItem('tubehub_sidebar_open');
+    return saved !== null ? saved === 'true' : false; // hidden by default
+  });
+
+  useEffect(() => {
+    localStorage.setItem('tubehub_sidebar_open', sidebarOpen);
+  }, [sidebarOpen]);
   const [feedVideos, setFeedVideos] = useState([]);
   const [feedPageToken, setFeedPageToken] = useState('');
   const [feedLoading, setFeedLoading] = useState(false);
@@ -246,6 +253,31 @@ export default function App() {
     }
 
     const isDash = activePlayItem.src.endsWith('/manifest.mpd') || activePlayItem.src.includes('manifest.mpd');
+    let onCanPlay = null;
+
+    try {
+      const stored = localStorage.getItem('tubehub_resume_positions');
+      const positions = stored ? JSON.parse(stored) : {};
+      const savedTime = parseFloat(positions[activePlayItem.id]);
+      if (savedTime && savedTime > 1) {
+        onCanPlay = () => {
+          console.log(`Media is ready. Seeking to saved resume position: ${savedTime}s`);
+          videoRef.current.currentTime = savedTime;
+          
+          if (isFormatSwitchRef.current) {
+            if (wasPlayingBeforeSwitchRef.current) {
+              videoRef.current.play().catch(e => console.warn('Autoplay block on format switch:', e));
+            } else {
+              videoRef.current.pause();
+            }
+            isFormatSwitchRef.current = false;
+          }
+        };
+        videoRef.current.addEventListener('canplay', onCanPlay, { once: true });
+      }
+    } catch (e) {
+      console.warn('Failed to register canplay resume listener:', e);
+    }
 
     if (isDash) {
       // If player already exists and we are playing the same video ID, just attach the new quality manifest URL
@@ -283,6 +315,12 @@ export default function App() {
         videoRef.current.load();
       }
     }
+
+    return () => {
+      if (onCanPlay && videoRef.current) {
+        videoRef.current.removeEventListener('canplay', onCanPlay);
+      }
+    };
   }, [activePlayItem?.src, activePlayItem?.id]);
 
   const saveResumePosition = useCallback((videoId, time) => {
@@ -592,20 +630,16 @@ export default function App() {
         let lastQuality = localStorage.getItem('tubehub_last_quality') || '720';
         const cacheEnabled = localStorage.getItem('tubehub_enable_backend_cache') === 'true';
 
-        // If cache is disabled, downgrade requested video quality to 720p maximum
-        if (lastExt === 'mp4' && parseInt(lastQuality, 10) > 720 && !cacheEnabled) {
-          lastQuality = '720';
-        }
-
+        const isCachedOnServer = (histItem?.ext === lastExt && String(histItem?.quality) === String(lastQuality) && histItem?.isCached) || false;
         const durationStr = details?.contentDetails?.duration || histItem?.duration || '0';
         const durationSecs = parseISO8601ToSeconds(durationStr);
-        const isCachedOnServer = (histItem?.ext === lastExt && String(histItem?.quality) === String(lastQuality) && histItem?.isCached) || false;
+        const playQuality = parseInt(lastQuality, 10) || 720;
 
         setActivePlayItem({
           title: details?.snippet?.title || histItem?.title || 'Streaming Video',
           ext: lastExt,
           quality: lastQuality,
-          src: lastExt === 'mp4' && (cacheEnabled || isCachedOnServer)
+          src: lastExt === 'mp4' && (cacheEnabled || isCachedOnServer || playQuality > 720)
             ? `/api/v5/stream/${videoId}/${lastQuality}/manifest.mpd?duration=${durationSecs}&cache=${cacheEnabled}`
             : `/api/v5/stream/${videoId}?ext=${lastExt}&quality=${lastQuality}&cache=${cacheEnabled}`,
           id: videoId,
@@ -725,7 +759,8 @@ export default function App() {
       const cacheEnabled = localStorage.getItem('tubehub_enable_backend_cache') === 'true';
       const durationSecs = activePlayItem.duration || 0;
       const isCached = selectedFormat.isCached || false;
-      const newSrc = selectedFormat.ext === 'mp4' && (cacheEnabled || isCached)
+      const playQuality = parseInt(selectedFormat.quality, 10) || 720;
+      const newSrc = selectedFormat.ext === 'mp4' && (cacheEnabled || isCached || playQuality > 720)
         ? `/api/v5/stream/${route.videoId}/${selectedFormat.quality}/manifest.mpd?duration=${durationSecs}&cache=${cacheEnabled}`
         : `/api/v5/stream/${route.videoId}?ext=${selectedFormat.ext}&quality=${selectedFormat.quality}&cache=${cacheEnabled}`;
       if (activePlayItem.src !== newSrc) {
@@ -900,32 +935,20 @@ export default function App() {
     setVideoDuration(duration);
     resetControlsTimeout();
 
-    // Load saved resume position
+    // Update timeline values for UI sliders initially
     if (route.videoId) {
       try {
         const stored = localStorage.getItem('tubehub_resume_positions');
         const positions = stored ? JSON.parse(stored) : {};
-        const savedTime = positions[route.videoId];
+        const savedTime = parseFloat(positions[route.videoId]);
         if (savedTime && savedTime > 1 && savedTime < duration - 5) {
-          videoRef.current.currentTime = savedTime;
           setVideoCurrentTime(savedTime);
           lastSaveTimeRef.current = savedTime;
-          console.log(`Resumed video ${route.videoId} at ${savedTime} seconds`);
         } else {
           lastSaveTimeRef.current = 0;
         }
-
-        // Restore play/pause state if this reload is from a format switch
-        if (isFormatSwitchRef.current) {
-          isFormatSwitchRef.current = false;
-          if (wasPlayingBeforeSwitchRef.current) {
-            videoRef.current.play().catch(() => {});
-          } else {
-            videoRef.current.pause();
-          }
-        }
       } catch (err) {
-        console.warn('Failed to load resume position:', err);
+        console.warn('Failed to resolve initial timeline position:', err);
       }
     }
   };
@@ -1294,7 +1317,22 @@ export default function App() {
                     {/* Metadata details */}
                     <div className="flex gap-3 px-1">
                       {/* Mock User Avatar */}
-                      <div className="w-9 h-9 rounded-full bg-rose-500/15 border border-rose-500/10 text-rose-400 flex items-center justify-center font-bold text-sm shrink-0">
+                      {video.snippet?.channelId ? (
+                        <img 
+                          src={`/api/v5/channel/avatar/${video.snippet.channelId}`} 
+                          alt="" 
+                          className="w-9 h-9 rounded-full object-cover shrink-0 border border-white/10"
+                          onError={(e) => {
+                            e.target.style.display = 'none';
+                            const fallback = e.target.nextSibling;
+                            if (fallback) fallback.style.display = 'flex';
+                          }}
+                        />
+                      ) : null}
+                      <div 
+                        className="w-9 h-9 rounded-full bg-rose-500/15 border border-rose-500/10 text-rose-400 flex items-center justify-center font-bold text-sm shrink-0 select-none"
+                        style={{ display: video.snippet?.channelId ? 'none' : 'flex' }}
+                      >
                         {video.snippet?.channelTitle?.charAt(0) || 'Y'}
                       </div>
                       
@@ -1564,7 +1602,22 @@ export default function App() {
                     <div className="flex flex-wrap items-center justify-between gap-4 border-b border-white/5 pb-4">
                       {/* Channel profile */}
                       <div className="flex items-center gap-3">
-                        <div className="w-10 h-10 rounded-full bg-rose-500/15 text-rose-400 font-bold border border-rose-500/10 flex items-center justify-center select-none">
+                        {watchDetails.snippet?.channelId ? (
+                          <img 
+                            src={`/api/v5/channel/avatar/${watchDetails.snippet.channelId}`} 
+                            alt="" 
+                            className="w-10 h-10 rounded-full object-cover shrink-0 border border-white/10"
+                            onError={(e) => {
+                              e.target.style.display = 'none';
+                              const fallback = e.target.nextSibling;
+                              if (fallback) fallback.style.display = 'flex';
+                            }}
+                          />
+                        ) : null}
+                        <div 
+                          className="w-10 h-10 rounded-full bg-rose-500/15 text-rose-400 font-bold border border-rose-500/10 flex items-center justify-center select-none"
+                          style={{ display: watchDetails.snippet?.channelId ? 'none' : 'flex' }}
+                        >
                           {watchDetails.snippet?.channelTitle?.charAt(0)}
                         </div>
                         <div className="flex flex-col min-w-0">

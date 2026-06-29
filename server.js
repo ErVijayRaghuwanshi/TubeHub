@@ -239,6 +239,46 @@ app.get('/api/v5/thumbnail/:videoId', async (req, res) => {
     console.error(`Failed to fetch/cache thumbnail for video ${videoId}:`, err);
     res.status(404).send('Thumbnail not found.');
   }
+});// GET channel avatar proxy with backend caching
+app.get('/api/v5/channel/avatar/:channelId', async (req, res) => {
+  const { channelId } = req.params;
+  const avatarPath = path.join(DOWNLOADS_DIR, `channel_avatar_${channelId}.jpg`);
+
+  try {
+    // 1. Serve cached avatar if it exists
+    if (fs.existsSync(avatarPath)) {
+      return res.sendFile(avatarPath);
+    }
+
+    // 2. Fetch using YouTube API key if configured
+    if (!apiKey) {
+      return res.redirect(`https://ui-avatars.com/api/?name=${channelId}&background=f43f5e&color=fff`);
+    }
+
+    const url = `https://www.googleapis.com/youtube/v3/channels?part=snippet&id=${channelId}&key=${apiKey}`;
+    const response = await fetch(url);
+    if (!response.ok) {
+      throw new Error(`YouTube channel fetch returned status ${response.status}`);
+    }
+    const data = await response.json();
+    const items = data.items || [];
+    if (items.length > 0) {
+      const avatarUrl = items[0].snippet?.thumbnails?.default?.url;
+      if (avatarUrl) {
+        const imageRes = await fetch(avatarUrl);
+        if (imageRes.ok) {
+          const arrayBuffer = await imageRes.arrayBuffer();
+          const buffer = Buffer.from(arrayBuffer);
+          fs.writeFileSync(avatarPath, buffer);
+          return res.sendFile(avatarPath);
+        }
+      }
+    }
+    return res.redirect(`https://ui-avatars.com/api/?name=Channel&background=f43f5e&color=fff`);
+  } catch (err) {
+    console.error(`Failed to fetch/cache channel avatar for ${channelId}:`, err);
+    return res.redirect(`https://ui-avatars.com/api/?name=Channel&background=f43f5e&color=fff`);
+  }
 });
 
 // GET single video details

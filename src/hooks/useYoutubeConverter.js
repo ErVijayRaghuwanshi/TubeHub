@@ -192,11 +192,6 @@ export function useYoutubeConverter() {
       let lastQuality = localStorage.getItem('tubehub_last_quality');
       const cacheEnabled = localStorage.getItem('tubehub_enable_backend_cache') === 'true';
 
-      // If cache is disabled, downgrade video qualities above 720p
-      if (lastExt === 'mp4' && lastQuality && parseInt(lastQuality, 10) > 720 && !cacheEnabled) {
-        lastQuality = '720';
-      }
-
       let defaultFormat = null;
       const matches = [...videos, ...audios];
       if (lastExt && lastQuality) {
