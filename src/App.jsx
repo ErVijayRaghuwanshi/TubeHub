@@ -231,28 +231,33 @@ export default function App() {
     return () => {
       if (dashPlayerRef.current) {
         console.log('App unmount: destroying dash.js player instance');
-        dashPlayerRef.current.destroy();
+        try {
+          dashPlayerRef.current.destroy();
+        } catch (e) {}
         dashPlayerRef.current = null;
       }
     };
   }, []);
 
+  // Dual DASH & Progressive video player setup
   useEffect(() => {
-    if (!videoRef.current) return;
+    const videoElement = videoRef.current;
+    if (!videoElement) return;
 
     if (!activePlayItem) {
       if (dashPlayerRef.current) {
         console.log('Destroying active dash.js player instance');
-        dashPlayerRef.current.destroy();
+        try {
+          dashPlayerRef.current.destroy();
+        } catch (e) {}
         dashPlayerRef.current = null;
       }
       lastVideoIdRef.current = null;
-      videoRef.current.src = '';
-      videoRef.current.load();
+      videoElement.src = '';
+      videoElement.load();
       return;
     }
 
-    const isDash = activePlayItem.src.endsWith('/manifest.mpd') || activePlayItem.src.includes('manifest.mpd');
     let onCanPlay = null;
 
     try {
@@ -262,66 +267,72 @@ export default function App() {
       if (savedTime && savedTime > 1) {
         onCanPlay = () => {
           console.log(`Media is ready. Seeking to saved resume position: ${savedTime}s`);
-          videoRef.current.currentTime = savedTime;
+          videoElement.currentTime = savedTime;
           
           if (isFormatSwitchRef.current) {
             if (wasPlayingBeforeSwitchRef.current) {
-              videoRef.current.play().catch(e => console.warn('Autoplay block on format switch:', e));
+              videoElement.play().catch(e => console.warn('Autoplay block on format switch:', e));
             } else {
-              videoRef.current.pause();
+              videoElement.pause();
             }
             isFormatSwitchRef.current = false;
           }
         };
-        videoRef.current.addEventListener('canplay', onCanPlay, { once: true });
+        videoElement.addEventListener('canplay', onCanPlay, { once: true });
       }
     } catch (e) {
       console.warn('Failed to register canplay resume listener:', e);
     }
 
+    const isDash = activePlayItem.src.includes('manifest.mpd') || activePlayItem.src.endsWith('/manifest.mpd');
+
     if (isDash) {
-      // If player already exists and we are playing the same video ID, just attach the new quality manifest URL
       if (dashPlayerRef.current && lastVideoIdRef.current === activePlayItem.id) {
-        console.log('Switching quality on existing dash.js player instance:', activePlayItem.src);
-        dashPlayerRef.current.attachSource(activePlayItem.src);
-        return;
+        console.log('Attaching new DASH manifest to existing player:', activePlayItem.src);
+        try {
+          dashPlayerRef.current.attachSource(activePlayItem.src);
+        } catch (e) {
+          console.warn('Failed to attach source, recreating player:', e);
+          try { dashPlayerRef.current.destroy(); } catch (e) {}
+          const player = dashjs.MediaPlayer().create();
+          player.initialize(videoElement, activePlayItem.src, true);
+          dashPlayerRef.current = player;
+        }
+      } else {
+        if (dashPlayerRef.current) {
+          try { dashPlayerRef.current.destroy(); } catch (e) {}
+        }
+        console.log('Initializing new dash.js player instance:', activePlayItem.src);
+        const player = dashjs.MediaPlayer().create();
+        player.initialize(videoElement, activePlayItem.src, true);
+        dashPlayerRef.current = player;
       }
-
-      // If playing a different video ID, destroy the player first to avoid stream bleeding
-      if (dashPlayerRef.current) {
-        console.log('Destroying dash.js player instance for video ID transition');
-        dashPlayerRef.current.destroy();
-        dashPlayerRef.current = null;
-      }
-
-      console.log('Initializing dash.js media player for source:', activePlayItem.src);
-      const player = dashjs.MediaPlayer().create();
-      player.initialize(videoRef.current, activePlayItem.src, true);
-      dashPlayerRef.current = player;
       lastVideoIdRef.current = activePlayItem.id;
     } else {
       if (dashPlayerRef.current) {
         console.log('Destroying active dash.js player instance to play progressive source');
-        dashPlayerRef.current.destroy();
+        try {
+          dashPlayerRef.current.destroy();
+        } catch (e) {}
         dashPlayerRef.current = null;
       }
       lastVideoIdRef.current = null;
       console.log('Using native player for progressive source:', activePlayItem.src);
       
-      const prevSrc = videoRef.current.src;
+      const prevSrc = videoElement.src;
       const absoluteNewSrc = activePlayItem.src ? new URL(activePlayItem.src, window.location.href).href : '';
       if (prevSrc !== absoluteNewSrc) {
-        videoRef.current.src = activePlayItem.src;
-        videoRef.current.load();
+        videoElement.src = activePlayItem.src;
+        videoElement.load();
       }
     }
 
     return () => {
-      if (onCanPlay && videoRef.current) {
-        videoRef.current.removeEventListener('canplay', onCanPlay);
+      if (onCanPlay && videoElement) {
+        videoElement.removeEventListener('canplay', onCanPlay);
       }
     };
-  }, [activePlayItem?.src, activePlayItem?.id]);
+  }, [activePlayItem]);
 
   const saveResumePosition = useCallback((videoId, time) => {
     try {
@@ -357,6 +368,10 @@ export default function App() {
   const [isPurgingBackend, setIsPurgingBackend] = useState(false);
   const [isClearingBrowser, setIsClearingBrowser] = useState(false);
   const [enableBackendCache, setEnableBackendCache] = useState(() => localStorage.getItem('tubehub_enable_backend_cache') === 'true');
+  const [cacheTtl, setCacheTtl] = useState(() => localStorage.getItem('tubehub_cache_ttl') || '24');
+  const [cookieHeaderInput, setCookieHeaderInput] = useState('');
+  const [isImportingCookies, setIsImportingCookies] = useState(false);
+  const [cookieImportStatus, setCookieImportStatus] = useState(null);
 
   const loadStorageStats = useCallback(async () => {
     try {
@@ -408,6 +423,36 @@ export default function App() {
       alert("Error clearing browser storage.");
     } finally {
       setIsClearingBrowser(false);
+    }
+  };
+
+  const handleImportCookies = async () => {
+    if (!cookieHeaderInput.trim()) {
+      setCookieImportStatus({ type: 'error', message: 'Please paste your raw Cookie request header value first.' });
+      return;
+    }
+    setIsImportingCookies(true);
+    setCookieImportStatus(null);
+    try {
+      const response = await fetch('/api/v5/cookies', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ cookieHeader: cookieHeaderInput })
+      });
+      const data = await response.json();
+      if (response.ok && data.success) {
+        setCookieImportStatus({ type: 'success', message: 'YouTube session cookies imported successfully!' });
+        setCookieHeaderInput('');
+      } else {
+        setCookieImportStatus({ type: 'error', message: data.message || 'Failed to import cookies.' });
+      }
+    } catch (err) {
+      console.error(err);
+      setCookieImportStatus({ type: 'error', message: 'Network error importing cookies.' });
+    } finally {
+      setIsImportingCookies(false);
     }
   };
 
@@ -630,18 +675,20 @@ export default function App() {
         let lastQuality = localStorage.getItem('tubehub_last_quality') || '720';
         const cacheEnabled = localStorage.getItem('tubehub_enable_backend_cache') === 'true';
 
-        const isCachedOnServer = (histItem?.ext === lastExt && String(histItem?.quality) === String(lastQuality) && histItem?.isCached) || false;
         const durationStr = details?.contentDetails?.duration || histItem?.duration || '0';
         const durationSecs = parseISO8601ToSeconds(durationStr);
-        const playQuality = parseInt(lastQuality, 10) || 720;
+
+        const formatsList = lastExt === 'mp3' ? details?.formats?.audio : details?.formats?.video;
+        const activeFormatObj = formatsList?.find(f => String(f.quality) === String(lastQuality) && f.ext === lastExt);
+        const isCached = activeFormatObj?.isCached || false;
 
         setActivePlayItem({
           title: details?.snippet?.title || histItem?.title || 'Streaming Video',
           ext: lastExt,
           quality: lastQuality,
-          src: lastExt === 'mp4' && (cacheEnabled || isCachedOnServer || playQuality > 720)
-            ? `/api/v5/stream/${videoId}/${lastQuality}/manifest.mpd?duration=${durationSecs}&cache=${cacheEnabled}`
-            : `/api/v5/stream/${videoId}?ext=${lastExt}&quality=${lastQuality}&cache=${cacheEnabled}`,
+          src: (lastExt === 'mp4' && !isCached)
+            ? `/api/v5/stream/${videoId}/manifest.mpd?cache=${cacheEnabled}&ttl=${cacheTtl}`
+            : `/api/v5/stream/${videoId}?ext=${lastExt}&quality=${lastQuality}&cache=${cacheEnabled}&ttl=${cacheTtl}`,
           id: videoId,
           isOffline: false,
           duration: durationSecs
@@ -653,7 +700,7 @@ export default function App() {
     } finally {
       setWatchLoading(false);
     }
-  }, [history, handleConvert]);
+  }, [history, handleConvert, cacheTtl]);
 
   useEffect(() => {
     if (route.name === 'watch') {
@@ -673,7 +720,7 @@ export default function App() {
   // Poll backend cache status for active video stream (acts as active play heartbeat)
   useEffect(() => {
     const cacheEnabled = localStorage.getItem('tubehub_enable_backend_cache') === 'true';
-    if (route.name !== 'watch' || !activePlayItem || activePlayItem.isOffline) {
+    if (route.name !== 'watch' || !selectedFormat || selectedFormat.isCached || activePlayItem?.isOffline) {
       // eslint-disable-next-line react-hooks/set-state-in-effect
       setServerCacheProgress(0);
       startedAsUncachedRef.current = false;
@@ -686,7 +733,7 @@ export default function App() {
 
     async function checkStatus() {
       try {
-        const response = await fetch(`/api/v5/cache/status/${activePlayItem.id}?ext=${activePlayItem.ext}&quality=${activePlayItem.quality}`);
+        const response = await fetch(`/api/v5/cache/status/${route.videoId}?ext=${selectedFormat.ext}&quality=${selectedFormat.quality}`);
         if (response.ok && isMounted) {
           const data = await response.json();
           setServerCacheProgress(data.progress || 0);
@@ -700,8 +747,8 @@ export default function App() {
 
           if (data.isCached || data.progress === 100) {
             setCurrentVideo(prev => prev ? { ...prev, isCached: true } : null);
-            setAudioFormats(prev => prev.map(f => String(f.quality) === String(activePlayItem.quality) && f.ext === activePlayItem.ext ? { ...f, isCached: true } : f));
-            setVideoFormats(prev => prev.map(f => String(f.quality) === String(activePlayItem.quality) && f.ext === activePlayItem.ext ? { ...f, isCached: true } : f));
+            setAudioFormats(prev => prev.map(f => String(f.quality) === String(selectedFormat.quality) && f.ext === selectedFormat.ext ? { ...f, isCached: true } : f));
+            setVideoFormats(prev => prev.map(f => String(f.quality) === String(selectedFormat.quality) && f.ext === selectedFormat.ext ? { ...f, isCached: true } : f));
 
             // Force player reload only if it transitioned from uncached to cached during this session
             if (startedAsUncachedRef.current && videoRef.current && cacheEnabled) {
@@ -711,20 +758,13 @@ export default function App() {
               console.log('Backend cache completed. Reloading stream source to switch to high-quality file.');
               
               // Save position and play state for the format switch handler
-              saveResumePosition(activePlayItem.id, currentTime);
+              saveResumePosition(route.videoId, currentTime);
               wasPlayingBeforeSwitchRef.current = isPlaying;
               isFormatSwitchRef.current = true;
-
-              // Append a cache-buster query parameter to force browser to request the cached file
-              setActivePlayItem(prev => {
-                if (!prev) return null;
-                const cleanSrc = prev.src.replace(/[&?]_t=\d+/, '');
-                return {
-                  ...prev,
-                  src: `${cleanSrc}${cleanSrc.includes('?') ? '&' : '?'}_t=${Date.now()}`
-                };
-              });
             }
+
+            // Sync the active selected format's cached state to trigger the switcher update
+            selectFormat({ ...selectedFormat, isCached: true });
 
             if (pollInterval) clearInterval(pollInterval);
           }
@@ -744,9 +784,9 @@ export default function App() {
       isMounted = false;
       if (pollInterval) clearInterval(pollInterval);
     };
-  }, [route.name, activePlayItem, setCurrentVideo, setAudioFormats, setVideoFormats, saveResumePosition]);
+  }, [route.name, activePlayItem?.isOffline, route.videoId, setCurrentVideo, setAudioFormats, setVideoFormats, saveResumePosition, selectedFormat, selectFormat]);
 
-  // Dynamically update stream URL when user changes format/quality selection on watch page
+  // Dynamically update stream URL and trigger backend caching
   useEffect(() => {
     if (
       route.name === 'watch' &&
@@ -757,12 +797,11 @@ export default function App() {
       activePlayItem.id === route.videoId
     ) {
       const cacheEnabled = localStorage.getItem('tubehub_enable_backend_cache') === 'true';
-      const durationSecs = activePlayItem.duration || 0;
       const isCached = selectedFormat.isCached || false;
-      const playQuality = parseInt(selectedFormat.quality, 10) || 720;
-      const newSrc = selectedFormat.ext === 'mp4' && (cacheEnabled || isCached || playQuality > 720)
-        ? `/api/v5/stream/${route.videoId}/${selectedFormat.quality}/manifest.mpd?duration=${durationSecs}&cache=${cacheEnabled}`
-        : `/api/v5/stream/${route.videoId}?ext=${selectedFormat.ext}&quality=${selectedFormat.quality}&cache=${cacheEnabled}`;
+      const isMp4 = selectedFormat.ext === 'mp4';
+      const newSrc = isMp4 && !isCached
+        ? `/api/v5/stream/${route.videoId}/manifest.mpd?cache=${cacheEnabled}&ttl=${cacheTtl}`
+        : `/api/v5/stream/${route.videoId}?ext=${selectedFormat.ext}&quality=${selectedFormat.quality}&cache=${cacheEnabled}&ttl=${cacheTtl}`;
       if (activePlayItem.src !== newSrc) {
         // eslint-disable-next-line react-hooks/set-state-in-effect
         setActivePlayItem(prev => {
@@ -775,8 +814,98 @@ export default function App() {
           };
         });
       }
+
+      // If playing DASH and cache is enabled, trigger background cache download for selected quality
+      if (isMp4 && !isCached && cacheEnabled) {
+        console.log(`Triggering background cache download for quality: ${selectedFormat.quality}p`);
+        fetch(`/api/v5/stream/${route.videoId}?ext=mp4&quality=${selectedFormat.quality}&cache=true&ttl=${cacheTtl}`).catch(() => {});
+      }
     }
-  }, [selectedFormat, route.name, route.videoId, activePlayItem]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedFormat, route.name, route.videoId, activePlayItem?.id, cacheTtl]);
+
+  // Sync manual quality selection with dash.js player settings
+  useEffect(() => {
+    const player = dashPlayerRef.current;
+    if (!player || !selectedFormat || selectedFormat.ext !== 'mp4') return;
+
+    // Wait until stream is initialized to set quality
+    const handleStreamInitialized = () => {
+      let bitrates = [];
+      if (typeof player.getRepresentationsByType === 'function') {
+        bitrates = player.getRepresentationsByType('video') || [];
+      } else if (typeof player.getBitrateInfoListFor === 'function') {
+        bitrates = player.getBitrateInfoListFor('video') || [];
+      }
+
+      if (!bitrates || bitrates.length === 0) return;
+
+      const targetHeight = parseInt(selectedFormat.quality, 10);
+      
+      // Find the representation that matches the quality height (or closest height)
+      let index = bitrates.findIndex(b => b.id === `video-${targetHeight}` || b.height === targetHeight);
+      if (index === -1) {
+        // Fallback to closest matching height
+        let closestDiff = Infinity;
+        bitrates.forEach((b, i) => {
+          const diff = Math.abs(b.height - targetHeight);
+          if (diff < closestDiff) {
+            closestDiff = diff;
+            index = i;
+          }
+        });
+      }
+
+      if (index !== -1) {
+        console.log(`Setting dash.js manual quality to: ${bitrates[index].height}p (index ${index})`);
+        
+        // Disable auto ABR and force quality selection
+        if (typeof player.setAutoSwitchQualityFor === 'function') {
+          player.setAutoSwitchQualityFor('video', false);
+        } else if (typeof player.updateSettings === 'function') {
+          player.updateSettings({
+            streaming: {
+              abr: {
+                autoSwitchBitrate: {
+                  video: false
+                }
+              }
+            }
+          });
+        } else if (typeof player.setSettings === 'function') {
+          player.setSettings({
+            streaming: {
+              abr: {
+                autoSwitchBitrate: {
+                  video: false
+                }
+              }
+            }
+          });
+        }
+
+        // Apply quality selection using v5 or fallback to v4 API
+        if (typeof player.setRepresentationForTypeById === 'function') {
+          player.setRepresentationForTypeById('video', bitrates[index].id);
+        } else if (typeof player.setRepresentationForTypeByIndex === 'function') {
+          player.setRepresentationForTypeByIndex('video', index);
+        } else if (typeof player.setQualityFor === 'function') {
+          player.setQualityFor('video', index, true);
+        }
+      }
+    };
+
+    player.on('streamInitialized', handleStreamInitialized);
+    
+    // Also try setting it immediately if player is already initialized
+    try {
+      handleStreamInitialized();
+    } catch (e) {}
+
+    return () => {
+      player.off('streamInitialized', handleStreamInitialized);
+    };
+  }, [selectedFormat]);
 
   // Dynamic SEO tag management for the Watch page and defaults fallback
   useEffect(() => {
@@ -1406,7 +1535,7 @@ export default function App() {
                   >
                     <video 
                       ref={videoRef}
-                      src={(activePlayItem && (activePlayItem.src.includes('manifest.mpd') || activePlayItem.src.endsWith('/manifest.mpd'))) ? undefined : activePlayItem.src} 
+                      src={(activePlayItem && (activePlayItem.src.includes('manifest.mpd') || activePlayItem.src.endsWith('/manifest.mpd'))) ? undefined : (activePlayItem?.src || undefined)} 
                       autoPlay 
                       autoPictureInPicture={true}
                       poster={posterUrl || undefined}
@@ -2259,6 +2388,33 @@ export default function App() {
                   </label>
                 </div>
 
+                {/* Cache TTL Selection */}
+                {enableBackendCache && (
+                  <div className="flex items-center justify-between p-4 bg-slate-900/40 border border-white/5 rounded-xl select-none">
+                    <div className="flex flex-col gap-1 pr-4">
+                      <span className="text-xs font-bold text-white">Cache Expiry Policy (TTL)</span>
+                      <span className="text-[10px] text-slate-400 leading-normal">
+                        Control how long cached streams stay on the server before being automatically deleted.
+                      </span>
+                    </div>
+                    <select
+                      value={cacheTtl}
+                      onChange={(e) => {
+                        const value = e.target.value;
+                        setCacheTtl(value);
+                        localStorage.setItem('tubehub_cache_ttl', value);
+                      }}
+                      className="bg-slate-950 border border-white/10 rounded-xl px-3 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-rose-500/50 cursor-pointer select-none"
+                    >
+                      <option value="1">1 Hour</option>
+                      <option value="6">6 Hours</option>
+                      <option value="24">24 Hours (1 Day)</option>
+                      <option value="168">7 Days (1 Week)</option>
+                      <option value="infinite">Keep Forever (Infinite)</option>
+                    </select>
+                  </div>
+                )}
+
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mt-1">
                   {/* Backend Cache Card */}
                   <div className="bg-slate-900/40 border border-white/5 rounded-xl p-4 flex flex-col justify-between gap-3">
@@ -2293,6 +2449,40 @@ export default function App() {
                       {isClearingBrowser ? 'Clearing Storage...' : 'Clear Offline Library'}
                     </button>
                   </div>
+                </div>
+
+                {/* YouTube Cookies Import */}
+                <div className="flex flex-col gap-3 p-4 bg-slate-900/40 border border-white/5 rounded-xl">
+                  <div className="flex flex-col gap-1 select-none">
+                    <span className="text-xs font-bold text-white">Import YouTube Cookies (Bypass Bot Verification)</span>
+                    <span className="text-[10px] text-slate-400 leading-normal">
+                      Bypass "Sign in to confirm you're not a bot" playback errors. Paste the raw value of the <code>Cookie</code> request header copied from YouTube.com Developer Tools (Network tab).
+                    </span>
+                  </div>
+                  <textarea
+                    rows={2}
+                    value={cookieHeaderInput}
+                    onChange={(e) => setCookieHeaderInput(e.target.value)}
+                    placeholder="Paste raw cookie header here (e.g. visitor_info1_live=...; SID=...)"
+                    className="w-full bg-slate-950 border border-white/10 rounded-xl px-3 py-2 text-xs text-slate-200 placeholder-slate-600 focus:outline-none focus:border-rose-500/50 resize-y min-h-[50px]"
+                  />
+                  {cookieImportStatus && (
+                    <div className={`text-[10px] font-medium px-2.5 py-1 rounded-md ${
+                      cookieImportStatus.type === 'success' 
+                        ? 'bg-emerald-950/30 text-emerald-400 border border-emerald-500/20' 
+                        : 'bg-rose-950/30 text-rose-400 border border-rose-500/20'
+                    }`}>
+                      {cookieImportStatus.message}
+                    </div>
+                  )}
+                  <button
+                    type="button"
+                    disabled={isImportingCookies || !cookieHeaderInput.trim()}
+                    onClick={handleImportCookies}
+                    className="w-full sm:w-auto self-end px-5 py-2 bg-rose-600 hover:bg-rose-700 disabled:bg-slate-800 disabled:opacity-40 disabled:text-slate-500 text-white rounded-xl text-xs font-bold transition cursor-pointer select-none"
+                  >
+                    {isImportingCookies ? 'Importing...' : 'Import Cookies'}
+                  </button>
                 </div>
               </div>
 

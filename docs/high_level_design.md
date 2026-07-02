@@ -57,20 +57,21 @@ flowchart TD
     A[Start Playback] --> B{Saved Offline in Browser IDB?}
     B -- Yes --> C[Stream from IndexedDB Blob URL]
     B -- No --> D{Cached on Backend Server Disk?}
-    D -- Yes --> E[Stream from Server Local Cache]
-    D -- No --> F[Fetch Live stream from YouTube CDN & start background caching]
+    D -- Yes --> E[Stream Progressive Local File Directly]
+    D -- No --> F[Compile Dynamic DASH Multi-Representation Manifest]
+    F --> H[dash.js Player Fetches Video/Audio Ranges via Server CDN Proxy]
     E --> G[Display Media Playback]
     C --> G
-    F --> G
+    H --> G
 ```
 
 ### Precedence Details:
-1. **IndexedDB (Offline Store)**: Checked first. If a blob exists matching the requested format/quality, it is played fully client-side.
-2. **Exact Local Cache**: If the exact quality file (e.g. 720p MP4 or 256kbps MP3) exists on the server disk, it is served directly.
+1. **IndexedDB (Offline Store)**: Checked first. If a blob exists matching the requested format/quality, it is played fully client-side using a Blob URL.
+2. **Exact Local Cache (Server Progressive Stream)**: If the exact quality file (e.g. 720p MP4 or 256kbps MP3) exists in the server cache (`downloads/cache/`), the player bypasses the manifest and loads the file directly via progressive streaming.
 3. **Smart Cached Precedence**:
    * If a **higher or equal quality** video (MP4) is cached, the server plays it directly for the user's lower-quality play request, saving network resources.
    * If an MP3 is requested and *any* video is cached, the server transcodes the highest quality cached video available on disk on-the-fly and pipes it to the user.
-4. **Proxy & Background Cache**: If uncached, the server fetches the YouTube stream URL and proxies it via range requests. If backend caching is enabled, it concurrently spawns a yt-dlp job to download the file.
+4. **Adaptive DASH Manifest (Uncached Streams)**: If uncached, the server compiles a dynamic multi-representation manifest (`manifest.mpd`). The client `dash.js` instance streams the video smoothly across qualities by requesting individual byte chunks through the server's HTTPS range-proxy endpoint. Under the hood, a background downloader warms the cache for the selected representation.
 
 ---
 
@@ -123,14 +124,21 @@ sequenceDiagram
   }
   ```
 
-### 2. `GET /api/v5/stream/:videoId`
-* **Purpose**: Proxies streaming ranges or sends local cached files.
+### 2. `GET /api/v5/stream/:videoId/manifest.mpd`
+* **Purpose**: Compiles and returns a dynamic, aspect-ratio-aware DASH manifest XML file for adaptive playback.
+* **Query Parameters**:
+  * `cache`: `true` or `false` (default `false`, spins up a background caching thread for the initial selected resolution)
+  * `ttl`: Cache duration in seconds (optional)
+* **Response**: XML content (`Content-Type: application/dash+xml`) containing representations for all standard qualities (`1080`, `720`, `480`, `360`).
+
+### 3. `GET /api/v5/stream/:videoId`
+* **Purpose**: Streams cached MP4/MP3 files directly or plays transcoded audio on-the-fly.
 * **Query Parameters**:
   * `ext`: `mp3` or `mp4` (default `mp4`)
   * `quality`: target resolution/bitrate (e.g. `720`, `128`)
   * `cache`: `true` or `false` (enables server-side caching job)
 
-### 3. `GET /api/v5/cache/status/:videoId`
+### 4. `GET /api/v5/cache/status/:videoId`
 * **Purpose**: Returns progress for the active cache job. Serves as a keep-alive heartbeat.
 * **Response**:
   ```json
@@ -141,7 +149,7 @@ sequenceDiagram
   }
   ```
 
-### 4. `POST /api/v5/convert`
+### 5. `POST /api/v5/convert`
 * **Purpose**: Starts a background conversion job for downloading or browser offline saving.
 * **Payload**: `{ "token": "video-720-2vYyHb34upc" }`
 * **Response**: `{ "success": true, "jobId": "xyz123" }`

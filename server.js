@@ -21,14 +21,40 @@ if (!fs.existsSync(DOWNLOADS_DIR)) {
   fs.mkdirSync(DOWNLOADS_DIR);
 }
 
-// Helper to get or create a video-specific directory within downloads
+// Ensure subdirectories exist
+const cacheSubdir = path.join(DOWNLOADS_DIR, 'cache');
+if (!fs.existsSync(cacheSubdir)) {
+  fs.mkdirSync(cacheSubdir, { recursive: true });
+}
+
+// Migrate legacy downloads (downloads/[videoId]) to persistent cache (downloads/cache/[videoId])
+try {
+  const items = fs.readdirSync(DOWNLOADS_DIR);
+  items.forEach(item => {
+    if (item === 'cache' || item === 'temp' || item === 'cookies.txt') return;
+    const oldPath = path.join(DOWNLOADS_DIR, item);
+    const newPath = path.join(cacheSubdir, item);
+    try {
+      fs.renameSync(oldPath, newPath);
+      console.log(`Migrated legacy download asset ${item} to persistent cache directory`);
+    } catch (e) {
+      console.warn(`Failed to migrate legacy asset ${item}:`, e.message);
+    }
+  });
+} catch (err) {
+  console.warn('Failed to perform legacy download assets migration:', err.message);
+}
+
+// Helper to get or create a video-specific persistent cache directory within downloads/cache
 const getVideoDir = (videoId) => {
-  const dir = path.join(DOWNLOADS_DIR, videoId);
+  const dir = path.join(DOWNLOADS_DIR, 'cache', videoId);
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
   }
   return dir;
 };
+
+
 
 // Detect FFmpeg presence
 exec('ffmpeg -version', (err) => {
@@ -250,6 +276,7 @@ app.get('/api/v5/channel/avatar/:channelId', async (req, res) => {
       return res.sendFile(avatarPath);
     }
 
+    const apiKey = getYouTubeApiKey(req);
     // 2. Fetch using YouTube API key if configured
     if (!apiKey) {
       return res.redirect(`https://ui-avatars.com/api/?name=${channelId}&background=f43f5e&color=fff`);
@@ -336,9 +363,299 @@ app.get('/api/v5/youtube/comments/:videoId', async (req, res) => {
 // Privacy Stream Proxy with Background Caching
 // ----------------------------------------------------
 
+// Helper to write cache metadata JSON file (storing client-controlled TTL)
+const writeCacheMetadata = (cachePath, ttl) => {
+  if (!ttl) return;
+  const jsonPath = cachePath + '.json';
+  let expiresAt = null;
+
+  if (ttl === 'infinite' || ttl === 'never' || ttl === '-1') {
+    expiresAt = null;
+  } else {
+    const hours = parseFloat(ttl);
+    if (!isNaN(hours) && hours > 0) {
+      expiresAt = Date.now() + hours * 60 * 60 * 1000;
+    }
+  }
+
+  try {
+    fs.writeFileSync(jsonPath, JSON.stringify({ ttl, expiresAt }));
+    console.log(`Wrote cache metadata for ${path.basename(cachePath)} with TTL: ${ttl} (${expiresAt ? new Date(expiresAt).toISOString() : 'infinite'})`);
+  } catch (err) {
+    console.error(`Failed to write cache metadata:`, err);
+  }
+};
+
+// Helper to spawn a background cache download job using yt-dlp
+function triggerBackgroundCacheDownload(videoId, quality, ext, cachePath, jobKey, ttl) {
+  console.log(`Starting background cache download for format ${quality}.${ext} for video: ${videoId}`);
+  let flags = {
+    ...getBaseYtdlOpts(),
+    output: cachePath
+  };
+  if (ext === 'mp3') {
+    flags.extractAudio = true;
+    flags.audioFormat = 'mp3';
+    flags.audioQuality = `${quality}K`;
+  } else {
+    flags.format = `bestvideo[height<=${quality}][ext=mp4]+bestaudio[ext=m4a]/best[height<=${quality}][ext=mp4]/best`;
+    flags.mergeOutputFormat = 'mp4';
+  }
+
+  const child = youtubedl.exec(`https://www.youtube.com/watch?v=${videoId}`, flags);
+  const job = {
+    child,
+    progress: 0,
+    lastActive: Date.now(),
+    filename: cachePath
+  };
+  cacheJobs[jobKey] = job;
+
+  child.stdout.on('data', (data) => {
+    const text = data.toString();
+    const match = text.match(/\[download\]\s+(\d+(?:\.\d+)?)%/);
+    if (match) {
+      const percentage = parseFloat(match[1]);
+      job.progress = Math.min(percentage, 99);
+    }
+  });
+
+  child.then(() => {
+    if (cacheJobs[jobKey] === job) {
+      delete cacheJobs[jobKey];
+    }
+    writeCacheMetadata(cachePath, ttl);
+    console.log(`Background cache download completed for format ${quality}.${ext} for video: ${videoId}`);
+  }).catch((err) => {
+    if (cacheJobs[jobKey] === job) {
+      delete cacheJobs[jobKey];
+    }
+    if (fs.existsSync(cachePath)) {
+      try { fs.unlinkSync(cachePath); } catch (e) {}
+    }
+    console.error(`Background cache download failed for format ${quality}.${ext} for video: ${videoId}`, err);
+  });
+}
+
+// Helper to parse MP4 boxes from a buffer to get init and index ranges
+function getMP4Ranges(buffer) {
+  let offset = 0;
+  let initEnd = 0;
+  let indexStart = 0;
+  let indexEnd = 0;
+
+  while (offset < buffer.length - 8) {
+    const size = buffer.readUInt32BE(offset);
+    const type = buffer.toString('utf8', offset + 4, offset + 8);
+    if (size === 0 || size > 1000000) break;
+
+    if (type === 'ftyp' || type === 'moov') {
+      initEnd = offset + size;
+    } else if (type === 'sidx') {
+      indexStart = offset;
+      indexEnd = offset + size;
+      break;
+    }
+    offset += size;
+  }
+
+  return {
+    initRange: `0-${initEnd - 1}`,
+    indexRange: `${indexStart}-${indexEnd - 1}`
+  };
+}
+
+// Fetch first 10KB of a URL to extract MP4 DASH ranges
+async function getRangesForUrl(streamUrl) {
+  try {
+    const res = await fetch(streamUrl, {
+      headers: { 'Range': 'bytes=0-9999' }
+    });
+    if (!res.ok && res.status !== 206) {
+      throw new Error(`HTTP status ${res.status}`);
+    }
+    const arrayBuffer = await res.arrayBuffer();
+    const buffer = Buffer.from(arrayBuffer);
+    return getMP4Ranges(buffer);
+  } catch (err) {
+    console.error('Failed to parse MP4 ranges from URL:', err);
+    // Fallback safe defaults if network request fails
+    return {
+      initRange: '0-999',
+      indexRange: '1000-1999'
+    };
+  }
+}
+
+// YouTube CDN HTTPS range proxy
+app.get('/api/v5/youtube-proxy', async (req, res) => {
+  const { url } = req.query;
+  if (!url) {
+    return res.status(400).send('Missing url parameter.');
+  }
+  
+  try {
+    const parsedUrl = new URL(url);
+    const headers = {};
+    
+    // Forward the Range header if present
+    if (req.headers.range) {
+      headers['Range'] = req.headers.range;
+    }
+    
+    // Ensure we send standard User-Agent or match base options
+    headers['User-Agent'] = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36';
+    
+    const options = {
+      method: 'GET',
+      hostname: parsedUrl.hostname,
+      path: parsedUrl.pathname + parsedUrl.search,
+      headers: headers
+    };
+    
+    const proxyReq = https.request(options, (proxyRes) => {
+      res.writeHead(proxyRes.statusCode, proxyRes.headers);
+      proxyRes.pipe(res);
+    });
+    
+    proxyReq.on('error', (err) => {
+      console.error('YouTube CDN proxy request failed:', err);
+      if (!res.headersSent) {
+        res.status(500).send('Proxy streaming failed.');
+      }
+    });
+    
+    req.on('close', () => {
+      proxyReq.destroy();
+    });
+    
+    proxyReq.end();
+    
+  } catch (err) {
+    console.error('Failed to proxy YouTube CDN request:', err);
+    if (!res.headersSent) {
+      res.status(400).send('Invalid URL.');
+    }
+  }
+});
+
+// Dynamic proxy DASH manifest generator
+app.get('/api/v5/stream/:videoId/manifest.mpd', async (req, res) => {
+  const { videoId } = req.params;
+  const { cache = 'false', quality = '720', ext = 'mp4', ttl } = req.query;
+  
+  try {
+    const videoUrl = `https://www.youtube.com/watch?v=${videoId}`;
+    
+    // Fetch video metadata
+    const output = await youtubedl(videoUrl, {
+      ...getBaseYtdlOpts(),
+      dumpSingleJson: true
+    });
+
+    const formats = output.formats || [];
+    
+    // Find the best audio-only MP4 format (AAC)
+    const audioFormat = formats
+      .filter(f => f.acodec && f.acodec !== 'none' && f.vcodec === 'none' && (f.ext === 'm4a' || f.acodec.startsWith('mp4a')))
+      .sort((a, b) => (b.tbr || 0) - (a.tbr || 0))[0];
+
+    if (!audioFormat) {
+      return res.status(404).send('DASH compatible audio format not found.');
+    }
+
+    // Find the best video-only MP4 format (AVC/H264) for each of the standard target qualities: 1080, 720, 480, 360
+    const targetQualities = [1080, 720, 480, 360];
+    const uniqueVideoFormats = [];
+    const seenFormatIds = new Set();
+
+    for (const q of targetQualities) {
+      const bestF = formats
+        .filter(f => f.vcodec && f.vcodec !== 'none' && f.acodec === 'none' && f.ext === 'mp4' && f.vcodec.startsWith('avc1'))
+        .filter(f => f.height && f.height <= q)
+        .sort((a, b) => (b.height || 0) - (a.height || 0) || (b.tbr || 0) - (a.tbr || 0))[0];
+
+      if (bestF && !seenFormatIds.has(bestF.format_id)) {
+        seenFormatIds.add(bestF.format_id);
+        bestF.standardQuality = q;
+        uniqueVideoFormats.push(bestF);
+      }
+    }
+
+    if (uniqueVideoFormats.length === 0) {
+      return res.status(404).send('DASH compatible video formats not found.');
+    }
+
+    // Fetch index ranges in parallel for audio and all unique video formats
+    const rangeRequests = [
+      getRangesForUrl(audioFormat.url),
+      ...uniqueVideoFormats.map(f => getRangesForUrl(f.url))
+    ];
+
+    const rangeResults = await Promise.all(rangeRequests);
+    const audioRanges = rangeResults[0];
+    const videoRangesList = rangeResults.slice(1);
+
+    const duration = output.duration || 0;
+    const host = req.get('host');
+    const protocol = req.protocol;
+    const proxyBase = `${protocol}://${host}/api/v5/youtube-proxy`;
+
+    const audioProxyUrl = `${proxyBase}?url=${encodeURIComponent(audioFormat.url)}`;
+
+    // Build the video representations XML blocks
+    const videoRepresentations = uniqueVideoFormats.map((f, index) => {
+      const videoRanges = videoRangesList[index];
+      const videoProxyUrl = `${proxyBase}?url=${encodeURIComponent(f.url)}`;
+      return `      <Representation id="video-${f.standardQuality}" bandwidth="${Math.round((f.tbr || 500) * 1000)}" codecs="${f.vcodec}" width="${f.width || 1280}" height="${f.height || 720}" frameRate="${f.fps || 30}">
+        <BaseURL>${videoProxyUrl.replace(/&/g, '&amp;')}</BaseURL>
+        <SegmentBase indexRange="${videoRanges.indexRange}">
+          <Initialization range="${videoRanges.initRange}"/>
+        </SegmentBase>
+      </Representation>`;
+    }).join('\n');
+
+    const mpd = `<?xml version="1.0" encoding="UTF-8"?>
+<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" profiles="urn:mpeg:dash:profile:isoff-on-demand:2011" type="static" mediaPresentationDuration="PT${duration}S" minBufferTime="PT2.0S">
+  <Period>
+    <!-- Video Adaptation Set with multiple resolutions -->
+    <AdaptationSet mimeType="video/mp4" segmentAlignment="true" startWithSAP="1" subsegmentAlignment="true" subsegmentStartsWithSAP="1">
+${videoRepresentations}
+    </AdaptationSet>
+    <!-- Audio Track -->
+    <AdaptationSet mimeType="audio/mp4" segmentAlignment="true" startWithSAP="1" subsegmentAlignment="true" subsegmentStartsWithSAP="1">
+      <Representation id="audio" bandwidth="${Math.round((audioFormat.tbr || 128) * 1000)}" codecs="${audioFormat.acodec}" audioSamplingRate="${audioFormat.asr || 44100}">
+        <BaseURL>${audioProxyUrl.replace(/&/g, '&amp;')}</BaseURL>
+        <SegmentBase indexRange="${audioRanges.indexRange}">
+          <Initialization range="${audioRanges.initRange}"/>
+        </SegmentBase>
+      </Representation>
+    </AdaptationSet>
+  </Period>
+</MPD>`;
+
+    res.setHeader('Content-Type', 'application/dash+xml');
+    res.send(mpd);
+
+    // Trigger background cache download in parallel if cache=true is requested (for the selected initial quality)
+    const cachePath = path.join(getVideoDir(videoId), `cache_${quality}.${ext}`);
+    const jobKey = `${videoId}_${quality}_${ext}`;
+    
+    if (cache === 'true' && !cacheJobs[jobKey] && !fs.existsSync(cachePath)) {
+      triggerBackgroundCacheDownload(videoId, quality, ext, cachePath, jobKey, ttl);
+    }
+    
+  } catch (err) {
+    console.error('Failed to generate dynamic proxy DASH manifest:', err);
+    if (!res.headersSent) {
+      res.status(500).send('Error generating manifest.');
+    }
+  }
+});
+
 app.get('/api/v5/stream/:videoId', async (req, res) => {
   const { videoId } = req.params;
-  const { ext = 'mp4', quality = '720', cache = 'false' } = req.query;
+  const { ext = 'mp4', quality = '720', cache = 'false', ttl } = req.query;
   const videoDir = getVideoDir(videoId);
   const cachePath = path.join(videoDir, `cache_${quality}.${ext}`);
   const jobKey = `${videoId}_${quality}_${ext}`;
@@ -347,6 +664,7 @@ app.get('/api/v5/stream/:videoId', async (req, res) => {
     // 1. If requested exact file is fully cached, serve it directly
     if (fs.existsSync(cachePath) && !cacheJobs[jobKey]) {
       console.log(`Streaming ${ext} directly from local backend format cache.`);
+      writeCacheMetadata(cachePath, ttl); // Update cache expiry
       return res.sendFile(cachePath);
     }
 
@@ -406,61 +724,14 @@ app.get('/api/v5/stream/:videoId', async (req, res) => {
     // 2. If video/audio is not cached, cache is enabled, and not currently downloading in background, trigger download
     const isCacheEnabled = cache === 'true';
     if (isCacheEnabled && !cacheJobs[jobKey] && !fs.existsSync(cachePath)) {
-      console.log(`Starting background cache download for format ${quality}.${ext} for video: ${videoId}`);
-      let flags = {
-        ...getBaseYtdlOpts(),
-        output: cachePath
-      };
-      if (ext === 'mp3') {
-        flags.extractAudio = true;
-        flags.audioFormat = 'mp3';
-        flags.audioQuality = `${quality}K`;
-      } else {
-        flags.format = `bestvideo[height<=${quality}][ext=mp4]+bestaudio[ext=m4a]/best[height<=${quality}][ext=mp4]/best`;
-        flags.mergeOutputFormat = 'mp4';
-      }
-
-      const child = youtubedl.exec(`https://www.youtube.com/watch?v=${videoId}`, flags);
-      const job = {
-        child,
-        progress: 0,
-        lastActive: Date.now(),
-        filename: cachePath
-      };
-      cacheJobs[jobKey] = job;
-
-      child.stdout.on('data', (data) => {
-        const text = data.toString();
-        const match = text.match(/\[download\]\s+(\d+(?:\.\d+)?)%/);
-        if (match) {
-          const percentage = parseFloat(match[1]);
-          job.progress = Math.min(percentage, 99);
-        }
-      });
-
-      child.then(() => {
-        if (cacheJobs[jobKey] === job) {
-          delete cacheJobs[jobKey];
-        }
-        console.log(`Background cache download completed for format ${quality}.${ext} for video: ${videoId}`);
-      }).catch((err) => {
-        if (cacheJobs[jobKey] === job) {
-          delete cacheJobs[jobKey];
-        }
-        if (fs.existsSync(cachePath)) {
-          try { fs.unlinkSync(cachePath); } catch (e) {}
-        }
-        console.error(`Background cache download failed for format ${quality}.${ext} for video: ${videoId}`, err);
-      });
-    } else if (cacheJobs[jobKey]) {
-      cacheJobs[jobKey].lastActive = Date.now();
+      triggerBackgroundCacheDownload(videoId, quality, ext, cachePath, jobKey, ttl);
     }
 
     // 3. Simultaneously, proxy the stream from YouTube via HTTPS Range Request proxy
     const videoUrl = `https://www.youtube.com/watch?v=${videoId}`;
     const formatSelector = ext === 'mp3'
       ? 'bestaudio[ext=m4a]/bestaudio/best'
-      : `best[height<=${quality}][ext=mp4]/best`;
+      : `best[height<=${quality}][ext=mp4][acodec!=none][vcodec!=none]/best[acodec!=none][vcodec!=none]`;
 
     const streamUrl = await youtubedl(videoUrl, {
       ...getBaseYtdlOpts(),
@@ -493,6 +764,10 @@ app.get('/api/v5/stream/:videoId', async (req, res) => {
       }
     });
 
+    req.on('close', () => {
+      proxyReq.destroy();
+    });
+
     proxyReq.end();
 
   } catch (error) {
@@ -503,209 +778,7 @@ app.get('/api/v5/stream/:videoId', async (req, res) => {
   }
 });
 
-// Helper to wait for a file to exist and be fully written
-const waitForFile = async (filePath, timeoutMs = 12000) => {
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
-    if (fs.existsSync(filePath)) {
-      try {
-        const size1 = fs.statSync(filePath).size;
-        await new Promise(r => setTimeout(r, 200));
-        const size2 = fs.statSync(filePath).size;
-        if (size1 === size2 && size1 > 0) {
-          return true;
-        }
-      } catch (e) {}
-    }
-    await new Promise(r => setTimeout(r, 300));
-  }
-  return false;
-};
-
-// DASH Streaming and segment delivery endpoint
-app.get('/api/v5/stream/:videoId/:quality/:filename', async (req, res) => {
-  const { videoId, quality, filename } = req.params;
-  const videoDir = getVideoDir(videoId);
-  const dashDir = path.join(videoDir, `dash_${quality}`);
-  const manifestPath = path.join(dashDir, 'manifest.mpd');
-  const cachePath = path.join(videoDir, `cache_${quality}.mp4`);
-  const jobKey = `${videoId}_${quality}_mp4`;
-
-  // 1. Handle DASH Manifest request
-  if (filename === 'manifest.mpd') {
-    res.setHeader('Content-Type', 'application/dash+xml');
-
-    // Case A: Video is fully cached
-    if (fs.existsSync(cachePath) && !cacheJobs[jobKey]) {
-      if (!fs.existsSync(manifestPath)) {
-        if (!fs.existsSync(dashDir)) {
-          fs.mkdirSync(dashDir, { recursive: true });
-        }
-        console.log(`Packaging cached video cache_${quality}.mp4 to DASH...`);
-        const cmd = `ffmpeg -y -i "${cachePath}" -c copy -f dash -use_template 1 -use_timeline 1 -init_seg_name 'init-stream$RepresentationID$.m4s' -media_seg_name 'chunk-stream$RepresentationID$-$Number$.m4s' "${manifestPath}"`;
-        await new Promise((resolve) => {
-          exec(cmd, (error, stdout, stderr) => {
-            if (error) {
-              console.error('Failed to segment cached video to DASH:', stderr);
-            }
-            resolve();
-          });
-        });
-      }
-
-      if (fs.existsSync(manifestPath)) {
-        return res.sendFile(manifestPath);
-      } else {
-        return res.status(500).send('Failed to generate DASH manifest.');
-      }
-    }
-
-    // Case B: Video is NOT cached (or cache is in progress)
-    let job = cacheJobs[jobKey];
-    if (!job) {
-      console.log(`Starting dynamic on-the-fly DASH generation for video: ${videoId}`);
-      const duration = parseInt(req.query.duration, 10) || 300;
-      const saveCacheOnComplete = req.query.cache !== 'false';
-
-      if (!fs.existsSync(dashDir)) {
-        fs.mkdirSync(dashDir, { recursive: true });
-      }
-
-      // Fetch YouTube stream URL
-      const videoUrl = `https://www.youtube.com/watch?v=${videoId}`;
-      const formatSelector = `bestvideo[height<=${quality}][ext=mp4]+bestaudio[ext=m4a]/best[height<=${quality}][ext=mp4]/best`;
-
-      let streamUrl;
-      try {
-        streamUrl = await youtubedl(videoUrl, {
-          ...getBaseYtdlOpts(),
-          getUrl: true,
-          format: formatSelector
-        });
-      } catch (err) {
-        console.error(`Failed to fetch stream URL for dynamic DASH generation: ${err}`);
-        return res.status(500).send('Could not fetch video stream.');
-      }
-
-      // Split streams if yt-dlp returns separate audio and video URLs
-      const urls = streamUrl.split('\n').map(u => u.trim()).filter(Boolean);
-      const ffmpegArgs = ['-y'];
-      
-      urls.forEach(url => {
-        ffmpegArgs.push('-i', url);
-      });
-
-      if (urls.length === 2) {
-        ffmpegArgs.push('-map', '0:v:0', '-map', '1:a:0');
-      }
-
-      ffmpegArgs.push(
-        '-c', 'copy',
-        '-f', 'dash',
-        '-use_template', '1',
-        '-use_timeline', '0',
-        '-init_seg_name', 'init-stream$RepresentationID$.m4s',
-        '-media_seg_name', 'chunk-stream$RepresentationID$-$Number$.m4s',
-        manifestPath
-      );
-
-      // Spawn ffmpeg to download and chunk into DASH segments
-      const ffmpegProcess = spawn('ffmpeg', ffmpegArgs);
-
-      job = {
-        child: ffmpegProcess,
-        progress: 0,
-        lastActive: Date.now(),
-        filename: manifestPath,
-        isDashJob: true,
-        duration: duration,
-        dashDir: dashDir,
-        cachePath: cachePath,
-        saveCacheOnComplete: saveCacheOnComplete
-      };
-      cacheJobs[jobKey] = job;
-
-      ffmpegProcess.stderr.on('data', (data) => {
-        const text = data.toString();
-        const match = text.match(/time=\s*(\d+):(\d+):(\d+(?:\.\d+)?)/);
-        if (match) {
-          const hours = parseInt(match[1], 10);
-          const minutes = parseInt(match[2], 10);
-          const seconds = parseFloat(match[3]);
-          const currentProgressSeconds = hours * 3600 + minutes * 60 + seconds;
-          const percentage = Math.min((currentProgressSeconds / duration) * 100, 99);
-          job.progress = percentage;
-        }
-      });
-
-      ffmpegProcess.on('close', (code) => {
-        console.log(`DASH generator process for ${jobKey} closed with code ${code}`);
-        const activeJob = cacheJobs[jobKey];
-        if (activeJob === job) {
-          delete cacheJobs[jobKey];
-        }
-
-        if (code === 0) {
-          if (job.saveCacheOnComplete) {
-            console.log(`Merging DASH segments to single MP4 cache file: ${cachePath}`);
-            const mergeCmd = `ffmpeg -y -i "${manifestPath}" -c copy "${cachePath}"`;
-            exec(mergeCmd, (error, stdout, stderr) => {
-              if (error) {
-                console.error(`Failed to merge DASH segments to ${cachePath}:`, stderr);
-                try { fs.unlinkSync(cachePath); } catch (e) {}
-              } else {
-                console.log(`Successfully created unified cache file: ${cachePath}`);
-              }
-            });
-          }
-        } else {
-          if (!fs.existsSync(cachePath)) {
-            try {
-              fs.rmSync(dashDir, { recursive: true, force: true });
-            } catch (e) {}
-          }
-        }
-      });
-    } else {
-      job.lastActive = Date.now();
-    }
-
-    const created = await waitForFile(manifestPath, 8000);
-    if (created) {
-      try {
-        const xml = fs.readFileSync(manifestPath, 'utf8');
-        const duration = job ? job.duration : (parseInt(req.query.duration, 10) || 300);
-        
-        let modifiedXml = xml.replace(/type="dynamic"/g, 'type="static"');
-        if (!modifiedXml.includes('mediaPresentationDuration=')) {
-          modifiedXml = modifiedXml.replace(/type="static"/g, `type="static" mediaPresentationDuration="PT${duration}S"`);
-        }
-        
-        res.setHeader('Content-Type', 'application/dash+xml');
-        return res.send(modifiedXml);
-      } catch (err) {
-        console.error('Failed to read and modify manifest:', err);
-        return res.sendFile(manifestPath);
-      }
-    } else {
-      return res.status(504).send('Timeout waiting for manifest creation.');
-    }
-  }
-
-  // 2. Handle DASH Segment requests (.m4s and init files)
-  const segmentPath = path.join(dashDir, filename);
-  const created = await waitForFile(segmentPath, 10000);
-  if (created) {
-    if (filename.endsWith('.m4s')) {
-      res.setHeader('Content-Type', 'video/iso.segment');
-    }
-    return res.sendFile(segmentPath);
-  } else {
-    return res.status(404).send(`Segment ${filename} not found or timeout.`);
-  }
-});
-
-// GET cache status/progress for a video (acts as heartbeat to keep background cache download alive)
+// GET cache status/progress for a video
 app.get('/api/v5/cache/status/:videoId', (req, res) => {
   const { videoId } = req.params;
   const { ext = 'mp4', quality = '720' } = req.query;
@@ -719,29 +792,11 @@ app.get('/api/v5/cache/status/:videoId', (req, res) => {
 
   const job = cacheJobs[jobKey];
   if (job) {
-    job.lastActive = Date.now(); // Update heartbeat timestamp
     return res.json({ videoId, isCached: false, progress: job.progress || 0 });
   }
 
   res.json({ videoId, isCached: false, progress: 0 });
 });
-
-// Monitor and clean up stale cache jobs (no heartbeats for > 15 seconds)
-setInterval(() => {
-  const now = Date.now();
-  Object.keys(cacheJobs).forEach(jobKey => {
-    const job = cacheJobs[jobKey];
-    if (job && (now - job.lastActive > 15000)) {
-      console.log(`Killing stale cache job ${jobKey} due to inactivity.`);
-      try {
-        job.child.kill();
-      } catch (err) {
-        console.error(`Failed to kill stale cache job for ${jobKey}:`, err);
-      }
-      delete cacheJobs[jobKey];
-    }
-  });
-}, 5000);
 
 // Helper to recursively calculate size and count of files under a directory
 const getDirStats = (dirPath) => {
@@ -1014,6 +1069,7 @@ app.get('/api/v5/download/:jobId', (req, res) => {
 });
 
 // Background job executor using youtube-dl-exec (yt-dlp)
+// Background job executor using youtube-dl-exec (yt-dlp)
 async function runConversionJob(jobId, videoId, type, quality) {
   const job = jobs[jobId];
   try {
@@ -1036,38 +1092,45 @@ async function runConversionJob(jobId, videoId, type, quality) {
     // ---------------------------------------------------------
     // DATA SAVER CHECK: Try to resolve instantly from cache
     // ---------------------------------------------------------
-    let sourceVideoPath = null;
-    let isCacheComplete = false;
-    const videoDir = path.join(DOWNLOADS_DIR, videoId);
-    try {
-      if (fs.existsSync(videoDir)) {
-        const files = fs.readdirSync(videoDir);
-        const cachedVideoFile = files.find(f => f.startsWith('cache_') && f.endsWith('.mp4'));
-        if (cachedVideoFile) {
-          sourceVideoPath = path.join(videoDir, cachedVideoFile);
-          const parts = cachedVideoFile.replace('cache_', '').split('.');
-          const qStr = parts[0];
-          const ext = parts[1];
-          const jobKey = `${videoId}_${qStr}_${ext}`;
-          isCacheComplete = !cacheJobs[jobKey];
+    const videoDir = getVideoDir(videoId);
+    const cachePath = path.join(videoDir, `cache_${quality}.${job.ext}`);
+    const exactJobKey = `${videoId}_${quality}_${job.ext}`;
+    const isExactCacheComplete = fs.existsSync(cachePath) && !cacheJobs[exactJobKey];
+
+    if (isExactCacheComplete) {
+      fs.copyFileSync(cachePath, outputPath);
+      job.progress = 100;
+      job.status = 'completed';
+      console.log(`Job ${jobId} (${type}) resolved instantly from exact format cache.`);
+      return;
+    }
+
+    // If audio is requested, we can also extract it from ANY cached video file
+    if (type === 'audio') {
+      let bestCachedVideoPath = null;
+      let bestCachedQuality = -1;
+      try {
+        if (fs.existsSync(videoDir)) {
+          const files = fs.readdirSync(videoDir);
+          for (const file of files) {
+            if (file.startsWith('cache_') && file.endsWith('.mp4')) {
+              const qStr = file.replace('cache_', '').replace('.mp4', '');
+              const qVal = parseInt(qStr, 10);
+              const targetJobKey = `${videoId}_${qVal}_mp4`;
+              if (!isNaN(qVal) && !cacheJobs[targetJobKey] && qVal > bestCachedQuality) {
+                bestCachedQuality = qVal;
+                bestCachedVideoPath = path.join(videoDir, file);
+              }
+            }
+          }
         }
-      }
-    } catch (e) {}
+      } catch (e) {}
 
-    const cachePath = sourceVideoPath;
-
-    if (isCacheComplete && cachePath) {
-      if (type === 'video') {
-        fs.copyFileSync(cachePath, outputPath);
-        job.progress = 100;
-        job.status = 'completed';
-        console.log(`Job ${jobId} (video) resolved instantly from cache file.`);
-        return;
-      } else if (type === 'audio') {
+      if (bestCachedVideoPath) {
         // Transcode the locally cached video to mp3 instantly using local ffmpeg
-        console.log(`Transcoding local cache file ${cachePath} to audio job ${jobId}...`);
+        console.log(`Transcoding local cache file ${bestCachedVideoPath} to audio job ${jobId}...`);
         const ffmpegProcess = spawn('ffmpeg', [
-          '-i', cachePath,
+          '-i', bestCachedVideoPath,
           '-b:a', `${quality}k`,
           '-f', 'mp3',
           '-y',
@@ -1081,15 +1144,23 @@ async function runConversionJob(jobId, videoId, type, quality) {
             console.log(`Job ${jobId} (audio) resolved instantly via local transcode.`);
           } else {
             console.error(`Local transcode failed with code ${code}. Falling back to downloading.`);
-            downloadFromYouTube(jobId, videoUrl, type, quality, outputPath);
+            // Trigger download to cache path and wait for it
+            if (!cacheJobs[exactJobKey] && !fs.existsSync(cachePath)) {
+              triggerBackgroundCacheDownload(videoId, quality, job.ext, cachePath, exactJobKey, '24');
+            }
+            waitAndCopyCache(jobId, cachePath, exactJobKey, outputPath);
           }
         });
         return;
       }
     }
 
-    // Fallback: standard download from YouTube
-    await downloadFromYouTube(jobId, videoUrl, type, quality, outputPath);
+    // Fallback: standard download from YouTube to cache path, and then copy
+    if (!cacheJobs[exactJobKey] && !fs.existsSync(cachePath)) {
+      triggerBackgroundCacheDownload(videoId, quality, job.ext, cachePath, exactJobKey, '24');
+    }
+
+    await waitAndCopyCache(jobId, cachePath, exactJobKey, outputPath);
 
   } catch (error) {
     console.error(`Conversion job ${jobId} failed:`, error);
@@ -1097,47 +1168,25 @@ async function runConversionJob(jobId, videoId, type, quality) {
   }
 }
 
-// Download stream executor helper
-async function downloadFromYouTube(jobId, videoUrl, type, quality, outputPath) {
+// Helper to wait for a cache download job to complete, syncing progress, and copy result
+async function waitAndCopyCache(jobId, cachePath, exactJobKey, outputPath) {
   const job = jobs[jobId];
-  const flags = {
-    ...getBaseYtdlOpts(),
-    output: outputPath
-  };
-
-  if (type === 'audio') {
-    flags.extractAudio = true;
-    flags.audioFormat = 'mp3';
-    flags.audioQuality = `${quality}K`;
-  } else {
-    flags.format = `bestvideo[height<=${quality}]+bestaudio/best`;
-    flags.mergeOutputFormat = 'mp4';
+  if (cacheJobs[exactJobKey]) {
+    console.log(`Job ${jobId} is waiting for cache download job ${exactJobKey} to complete...`);
+    while (cacheJobs[exactJobKey]) {
+      job.progress = cacheJobs[exactJobKey].progress || 0;
+      await new Promise(r => setTimeout(r, 1000));
+    }
   }
 
-  console.log(`Downloading stream from YouTube for job ${jobId}...`);
-  const child = youtubedl.exec(videoUrl, flags);
-  
-  child.stdout.on('data', (data) => {
-    const text = data.toString();
-    const match = text.match(/\[download\]\s+(\d+(?:\.\d+)?)%/);
-    if (match) {
-      const percentage = parseFloat(match[1]);
-      job.progress = Math.min(percentage, 99);
-    }
-  });
-
-  child.stderr.on('data', (data) => {
-    console.warn(`[yt-dlp stderr for job ${jobId}]:`, data.toString());
-  });
-
-  await child;
-
-  if (fs.existsSync(outputPath)) {
+  if (fs.existsSync(cachePath)) {
+    fs.copyFileSync(cachePath, outputPath);
     job.progress = 100;
     job.status = 'completed';
-    console.log(`Job ${jobId} downloaded successfully.`);
+    console.log(`Job ${jobId} resolved successfully from completed cache.`);
   } else {
-    throw new Error(`Output file not found after download.`);
+    job.status = 'failed';
+    console.error(`Job ${jobId} failed because cache file was not created.`);
   }
 }
 
@@ -1148,51 +1197,159 @@ const CLEANUP_THRESHOLD_HOURS = parseInt(process.env.CLEANUP_THRESHOLD_HOURS) ||
 const CLEANUP_INTERVAL_MINUTES = parseInt(process.env.CLEANUP_INTERVAL_MINUTES) || 60;
 
 function startCleanupSchedule() {
-  console.log(`Scheduling background cleanup every ${CLEANUP_INTERVAL_MINUTES} minutes. Files older than ${CLEANUP_THRESHOLD_HOURS} hours will be deleted.`);
+  console.log(`Scheduling background cleanup every ${CLEANUP_INTERVAL_MINUTES} minutes. Default TTL is ${CLEANUP_THRESHOLD_HOURS} hours.`);
   
   setInterval(() => {
-    console.log('Running scheduled downloads cleanup...');
-    fs.readdir(DOWNLOADS_DIR, (err, files) => {
-      if (err) {
-        console.error('Failed to read downloads directory for cleanup:', err);
-        return;
-      }
-      
-      const now = Date.now();
-      const thresholdMs = CLEANUP_THRESHOLD_HOURS * 60 * 60 * 1000;
-      
-      files.forEach((file) => {
-        const filePath = path.join(DOWNLOADS_DIR, file);
-        
-        fs.stat(filePath, (err, stats) => {
-          if (err) {
-            console.error(`Failed to stat file ${file} for cleanup:`, err);
-            return;
+    console.log('Running scheduled cache and download cleanup...');
+    const now = Date.now();
+    const defaultThresholdMs = CLEANUP_THRESHOLD_HOURS * 60 * 60 * 1000;
+
+    // 1. Clean files direct under downloads/ (like channel avatars or old conversions)
+    try {
+      if (fs.existsSync(DOWNLOADS_DIR)) {
+        const files = fs.readdirSync(DOWNLOADS_DIR);
+        files.forEach(file => {
+          const filePath = path.join(DOWNLOADS_DIR, file);
+          const stats = fs.statSync(filePath);
+          if (stats.isFile()) {
+            if (file === 'cookies.txt') return;
+            const ageMs = now - stats.mtimeMs;
+            if (ageMs > defaultThresholdMs) {
+              fs.unlinkSync(filePath);
+              console.log(`Deleted stale download file: ${file} (Age: ${(ageMs / (60 * 60 * 1000)).toFixed(1)} hours)`);
+            }
           }
-          
-          const ageMs = now - stats.mtimeMs;
-          if (ageMs > thresholdMs) {
-            fs.unlink(filePath, (err) => {
-              if (err) {
-                console.error(`Failed to delete old file ${file}:`, err);
-              } else {
-                console.log(`Deleted stale download file: ${file} (Age: ${(ageMs / (60 * 60 * 1000)).toFixed(1)} hours)`);
-                
-                // Remove job from tracking if applicable
-                const jobId = path.basename(file, path.extname(file));
-                const baseJobId = jobId.replace('cache_', '').split('_')[0];
-                if (jobs[baseJobId]) {
-                  delete jobs[baseJobId];
-                  console.log(`Removed job ${baseJobId} from tracking database.`);
+        });
+      }
+    } catch (e) {
+      console.error('Failed to clean root downloads dir:', e);
+    }
+
+    // 2. Clean files inside downloads/cache/ [videoId]/ folders
+    try {
+      const cacheDir = path.join(DOWNLOADS_DIR, 'cache');
+      if (fs.existsSync(cacheDir)) {
+        const videoDirs = fs.readdirSync(cacheDir);
+        videoDirs.forEach(videoId => {
+          const videoDir = path.join(cacheDir, videoId);
+          if (fs.statSync(videoDir).isDirectory()) {
+            const files = fs.readdirSync(videoDir);
+            files.forEach(file => {
+              if (file.endsWith('.json')) return; // handled with its media file
+              if (file === 'thumbnail.jpg') return; // let thumbnail stay, or check its age
+
+              const filePath = path.join(videoDir, file);
+              if (fs.statSync(filePath).isFile()) {
+                const jsonPath = filePath + '.json';
+                let expiresAt = null;
+                let hasJson = false;
+
+                if (fs.existsSync(jsonPath)) {
+                  try {
+                    const meta = JSON.parse(fs.readFileSync(jsonPath, 'utf8'));
+                    expiresAt = meta.expiresAt;
+                    hasJson = true;
+                  } catch (err) {
+                    console.warn(`Failed to parse cache metadata for ${file}:`, err);
+                  }
+                }
+
+                let shouldDelete = false;
+                let deleteReason = '';
+
+                if (hasJson) {
+                  if (expiresAt === null || expiresAt === -1) {
+                    shouldDelete = false; // infinite TTL
+                  } else if (now > expiresAt) {
+                    shouldDelete = true;
+                    deleteReason = `expired based on client TTL`;
+                  }
+                } else {
+                  // Fallback to default threshold hours using file mtime
+                  const stats = fs.statSync(filePath);
+                  const ageMs = now - stats.mtimeMs;
+                  if (ageMs > defaultThresholdMs) {
+                    shouldDelete = true;
+                    deleteReason = `exceeded default threshold of ${CLEANUP_THRESHOLD_HOURS} hours`;
+                  }
+                }
+
+                if (shouldDelete) {
+                  fs.unlinkSync(filePath);
+                  if (fs.existsSync(jsonPath)) {
+                    fs.unlinkSync(jsonPath);
+                  }
+                  console.log(`Deleted stale cache file: ${videoId}/${file} (${deleteReason})`);
                 }
               }
             });
+
+            // If video directory is empty (except thumbnail), remove it
+            const remaining = fs.readdirSync(videoDir);
+            const mediaRemaining = remaining.filter(f => f !== 'thumbnail.jpg' && !f.endsWith('.json'));
+            if (mediaRemaining.length === 0) {
+              remaining.forEach(f => {
+                try { fs.unlinkSync(path.join(videoDir, f)); } catch (e) {}
+              });
+              fs.rmdirSync(videoDir);
+              console.log(`Removed empty cache directory for video: ${videoId}`);
+            }
           }
         });
-      });
-    });
+      }
+    } catch (e) {
+      console.error('Failed to clean cache subdirectories:', e);
+    }
   }, CLEANUP_INTERVAL_MINUTES * 60 * 1000);
 }
+
+// Helper to convert raw Cookie header string to Netscape format
+function parseCookieStringToNetscape(cookieStr) {
+  const lines = [
+    '# Netscape HTTP Cookie File',
+    '# This file was generated automatically from a raw Cookie header',
+    '# Domain\tSubdomains\tPath\tSecure\tExpiration\tName\tValue'
+  ];
+  
+  const pairs = cookieStr.split(';');
+  pairs.forEach(pair => {
+    const trimmed = pair.trim();
+    if (!trimmed) return;
+    const eqIndex = trimmed.indexOf('=');
+    if (eqIndex === -1) return;
+    const name = trimmed.substring(0, eqIndex);
+    const value = trimmed.substring(eqIndex + 1);
+    
+    const domain = '.youtube.com';
+    const subdomains = 'TRUE';
+    const path = '/';
+    const secure = name.startsWith('__Secure-') ? 'TRUE' : 'FALSE';
+    const expiration = '2147483647'; // Year 2038
+    
+    lines.push(`${domain}\t${subdomains}\t${path}\t${secure}\t${expiration}\t${name}\t${value}`);
+  });
+  
+  return lines.join('\n');
+}
+
+// POST endpoint to parse and import raw YouTube Cookie header
+app.post('/api/v5/cookies', (req, res) => {
+  const { cookieHeader } = req.body;
+  if (!cookieHeader) {
+    return res.status(400).json({ success: false, message: 'Missing cookieHeader parameter.' });
+  }
+
+  try {
+    const netscapeContent = parseCookieStringToNetscape(cookieHeader);
+    const cookiesPath = path.join(DOWNLOADS_DIR, 'cookies.txt');
+    fs.writeFileSync(cookiesPath, netscapeContent, 'utf8');
+    console.log('Successfully generated and saved Netscape cookies.txt from raw header');
+    res.json({ success: true, message: 'Cookies imported successfully!' });
+  } catch (err) {
+    console.error('Failed to import cookies:', err);
+    res.status(500).json({ success: false, message: 'Failed to save cookies on the server.' });
+  }
+});
 
 // Serve static frontend assets from dist folder (production deployment)
 app.use(express.static(path.join(__dirname, 'dist')));

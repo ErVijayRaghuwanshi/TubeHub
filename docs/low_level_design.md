@@ -11,11 +11,11 @@ The backend groups files within video ID subdirectories to prevent directory clu
 ```
 downloads/
 ├── cookies.txt               # Stored cookies for yt-dlp authentication
-└── [videoId]/                # Unique video ID subfolders (e.g. 2vYyHb34upc)
-    ├── thumbnail.jpg         # Pre-cached or read-through video thumbnail
-    ├── cache_720.mp4         # Completed cached video format (720p)
-    ├── cache_128.mp3         # Completed cached audio format (128kbps)
-    └── [jobId].mp4           # Active/Temporary conversion files in progress
+└── cache/                    # Persistent backend media cache folder
+    └── [videoId]/            # Unique video ID subfolders (e.g. 2vYyHb34upc)
+        ├── thumbnail.jpg     # Pre-cached video thumbnail
+        ├── cache_1080.mp4    # Completed/Active cache video format (1080p)
+        └── cache_320.mp3     # Completed/Active cache audio format (320kbps)
 ```
 
 ### Browser Client Database (IndexedDB):
@@ -50,16 +50,22 @@ Server caching jobs are tracked statelessly in memory using the `cacheJobs` obje
 ```javascript
 const cacheJobs = {
   // Key format: `${videoId}_${quality}_${ext}`
-  "2vYyHb34upc_720_mp4": {
+  "2vYyHb34upc_1080_mp4": {
     child: ChildProcess,       // Spawned yt-dlp child process reference
     progress: 45,             // Current download percentage parsed from stdout
     lastActive: 1718304910394, // Last polled timestamp (refreshed by heartbeat)
-    filename: "/path/to/downloads/2vYyHb34upc/cache_720.mp4" // Absolute destination path
+    filename: "/path/to/downloads/cache/2vYyHb34upc/cache_1080.mp4" // Absolute destination path
   }
 };
 ```
 
-### Heartbeat Check Loop:
+### Co-Download Progress Syncing Hook
+When multiple client requests or download jobs target the same video format concurrently:
+1. The server checks `cacheJobs[jobKey]` to detect if a conversion job is already active for that format.
+2. If found, instead of starting a new process, the server binds the secondary job's feedback callback directly to the active `child` process progress feed.
+3. The secondary job's progress bar syncs in real-time, waits for the process to exit successfully, copies the resulting cache file to the designated client output folder, and returns a success response.
+
+### Heartbeat Check Check Loop:
 A 5-second interval loop validates job activity:
 ```javascript
 setInterval(() => {

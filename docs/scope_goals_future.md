@@ -9,7 +9,8 @@ This document outlines the definition, constraints, architectural goals, and fut
 TubeHub is a premium, personal web application designed for playing, converting, and archiving YouTube media locally. It prioritizes user privacy, data savings, and offline usage.
 
 ### In-Scope Features:
-* **Privacy Proxying**: All streaming content, metadata details, search suggestions, and thumbnails are proxied through a local backend server to shield user identity.
+* **Adaptive DASH Manifest Compiler**: Compiles aspect-ratio-aware multi-representation DASH manifests dynamically on the backend to facilitate smooth HD quality switching without reloading video players.
+* **Privacy Proxying**: All streaming content ranges, metadata details, search suggestions, and thumbnails are proxied through a local backend server to shield user identity.
 * **On-the-Fly Audio Extraction**: Demuxes and transcodes cached server videos into high-quality MP3s instantly via FFmpeg.
 * **Adaptive Caching**: Spawns server-side `yt-dlp` download jobs that automatically terminate if the user pauses or closes the player, saving internet bandwidth.
 * **Offline Sandbox Library**: Persistent offline storage of audio/video blobs in the browser's IndexedDB database, playable fully offline.
@@ -31,7 +32,8 @@ Decouple client browsers from tracking pixels and metadata collection by externa
 * Search results and trending feeds are loaded using server-side extraction libraries.
 
 ### 2. Bandwidth Minimization & Data Reduction
-* **No Duplicate Downloads**: If a video format (e.g. 720p MP4) is already cached on the server, requests for lower resolutions (e.g. 360p) will play the cached 720p directly.
+* **No Duplicate Downloads**: If a video format (e.g. 1080p MP4) is already cached on the server, requests for lower resolutions (e.g. 360p) will play the cached 1080p directly.
+* **Concurrency Protection (Progress Syncing)**: Co-download requests for the same media qualities are queued and synced directly to the active download thread instead of spawning redundant duplicate CLI transcoding processes.
 * **Local Transcoding**: If a user requests a `.mp3` stream of a video that is already cached as an `.mp4` on the server, the backend transcodes the audio on-the-fly and pipes it, saving the need to fetch anything from the internet.
 
 ### 3. Local Client Sandbox

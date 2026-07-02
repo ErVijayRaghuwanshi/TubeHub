@@ -7,28 +7,28 @@
 
 ## 🌟 Key Features
 
-### 1. YouTube Converter & Transcoding Selection
+### 1. Adaptive HD Playback (DASH Manifest Compiler)
+*   **Dynamic Multi-Representation Compiler:** Uncached videos stream using **DASH (Dynamic Adaptive Streaming over HTTP)**. The backend dynamically compiles a custom multi-representation DASH XML manifest (`manifest.mpd`) containing parallel-mapped tracks for all standard resolutions (`[1080, 720, 480, 360]`), correctly aligning cinematic/vertical aspect ratio heights (e.g. standard `1080` matching actual `1012p` format).
+*   **dash.js v5 Client Integration:** Playback is managed via a custom `dash.js` player configuration that overrides ABR to force manual quality locks in the browser without resetting the video element buffer, enabling **smooth, instant quality changes** without interrupts.
+
+### 2. YouTube Converter & Transcoding Selection
 *   **Audio Extractor (MP3):** Transcode audio streams in multiple qualities: `320 kbps (Ultra)`, `256 kbps (High)`, `192 kbps (Medium)`, and `128 kbps (Standard)`.
 *   **Video Downloader (MP4):** Transcode video streams in multiple resolutions: `1080p (Full HD)`, `720p (HD)`, `480p (SD)`, and `360p (Mobile)`.
 *   **Security Check Integration:** Seamless human verification checks powered by Cloudflare Turnstile inside a sleek dark theme widget.
 
-### 2. YouTube-Style Responsive Card Grid
-*   **YouTube Aesthetic:** Clean card structures featuring rounded corners, 16:9 aspect-video covers, uploader avatars, custom format badges (e.g. `MP3 • 320k`), and uploader details.
-*   **Interactive Play Overlays:** Hovering over any card zooms the thumbnail slightly and reveals a glowing red circular YouTube Play button.
-*   **Dynamic Grid Columns:** Fully responsive grid adapting dynamically across screens:
-    *   **Mobile:** 1 column (`grid-cols-1`)
-    *   **Tablet/Laptops:** 2 columns (`sm:grid-cols-2`)
-    *   **Desktop/Large Screens:** 3 columns (`lg:grid-cols-3 gap-8`)
-*   **Spacious Canvas:** Toggling to the library tab dynamically expands the layout width from `max-w-4xl` to `max-w-7xl` to give the video grid cinematic breathing room.
+### 3. Unified Conversion Caching & Concurrency
+*   **Unified Cache Pipeline:** All video and audio downloads write directly to a shared backend `/downloads/cache/[videoId]/` repository.
+*   **Instant Co-download Hook (Concurrency):** If Job A is actively downloading `cache_1080.mp4`, Job B (e.g. clicking "Download to Computer" for the same format) automatically detects the active download, binds its progress indicator to Job A in real-time, waits for it to complete, and copies the resulting cache file instantly.
+*   **Loop-Free Status Polling:** A React-synchronized background heartbeat loop polls cache progress and updates dropdown options and player source states cleanly upon completion without UI/render lag.
 
-### 3. TubeHub Browser Media Center (Offline DB)
+### 4. TubeHub Browser Media Center (Offline DB)
 *   **IndexedDB Binary Database:** Bypasses standard `localStorage` 5MB string limitations by saving full binary media Blobs directly inside the browser database.
 *   **Offline Access Badge:** Saved files display a glowing green "Offline" badge.
 *   **Instant Local Downloads:** Export saved media files instantly to your PC's filesystem directly from your local browser database, without querying the remote CDN servers again.
 *   **Individual Library Deletion:** Delete cards individually to clean up the dashboard history list and automatically delete their cached media blobs from your browser storage.
 *   **Live Library Filters:** Filter cards in real-time by *All Files*, *Audio (MP3)*, *Video (MP4)*, and *Offline Saved*, alongside a title search bar.
 
-### 4. Theater Video Player & Google Chrome Auto-PiP
+### 5. Theater Video Player & Google Chrome Auto-PiP
 *   **Theater Modal Screen:** Play converted MP4 videos inside an enlarged, centered `max-w-5xl` theater player.
 *   **Chrome Tab Auto-PiP:** Supports native browser Picture-in-Picture. If a video is playing, switching browser tabs automatically pops the video into an "always-on-top" floating window. Returning to the TubeHub tab automatically exits PiP and restores the player in the modal overlay.
 *   **Internal Tab Auto-PiP:** Switching tabs within the app (e.g., leaving the Library to check the Converter tab) automatically triggers PiP via user clicks, keeping playback active while you convert new links.
