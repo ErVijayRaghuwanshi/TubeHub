@@ -6,7 +6,7 @@ import { getMedia, getMediaSizeEstimate, clearAllStorage } from './services/db';
 import { 
   X, Volume2, Film, PictureInPicture, Play, Pause, Volume1, VolumeX, 
   SkipBack, SkipForward, Maximize, Minimize, Search, Settings, Clock, 
-  Download, ChevronDown, ChevronUp, Menu, Library, Database
+  Download, ChevronDown, ChevronUp, Menu, Library, Database, ChevronLeft
 } from 'lucide-react';
 
 // Sub-component to render offline thumbnails loaded from IndexedDB
@@ -222,6 +222,8 @@ export default function App() {
   const [showVideoControls, setShowVideoControls] = useState(true);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [isDraggingVideoTimeline, setIsDraggingVideoTimeline] = useState(false);
+  const [showSettingsMenu, setShowSettingsMenu] = useState(false);
+  const [settingsSubMenu, setSettingsSubMenu] = useState('main');
 
   const dashPlayerRef = useRef(null);
   const lastVideoIdRef = useRef(null);
@@ -316,7 +318,8 @@ export default function App() {
         } catch (e) {}
         dashPlayerRef.current = null;
       }
-      lastVideoIdRef.current = null;
+      const isNewVideo = lastVideoIdRef.current !== activePlayItem.id;
+      lastVideoIdRef.current = activePlayItem.id;
       console.log('Using native player for progressive source:', activePlayItem.src);
       
       const prevSrc = videoElement.src;
@@ -324,6 +327,9 @@ export default function App() {
       if (prevSrc !== absoluteNewSrc) {
         videoElement.src = activePlayItem.src;
         videoElement.load();
+        if (isNewVideo) {
+          videoElement.play().catch(e => console.warn('Native player autoplay failed:', e));
+        }
       }
     }
 
@@ -946,7 +952,7 @@ export default function App() {
         if (el) el.setAttribute('content', content);
       };
 
-      updateMetaTag('name', 'description', 'TubeHub is a fast and secure YouTube to MP3 and MP4 converter. Convert YouTube links to high-quality audio up to 320kbps or video up to 1080p, store media offline in your browser, and play instantly.');
+      updateMetaTag('name', 'description', 'TubeHub is a fast and secure YouTube to MP3 and MP4 converter. Convert YouTube links to high-quality audio up to 320kbps or video up to 8K, store media offline in your browser, and play instantly.');
       updateMetaTag('property', 'og:title', 'TubeHub | Premium YouTube to MP3 & MP4 Converter');
       updateMetaTag('property', 'og:description', 'Convert YouTube links to high-quality audio & video. Save media offline directly in your browser database and play instantly without server buffering.');
       updateMetaTag('property', 'og:image', '/favicon.svg');
@@ -987,13 +993,26 @@ export default function App() {
 
   // Autoplay next video implementation
   const playNextVideo = () => {
-    if (feedVideos.length === 0) return;
-    const currentIndex = feedVideos.findIndex(v => v.id === route.videoId);
-    const nextIndex = currentIndex !== -1 ? currentIndex + 1 : 0;
-    
-    if (nextIndex < feedVideos.length) {
-      const nextVideo = feedVideos[nextIndex];
-      navigate('watch', { v: nextVideo.id });
+    const offlineRecs = history.filter(item => 
+      item.id !== route.videoId && 
+      (item.savedInBrowser || item.downloadUrl || (item.ext && item.quality))
+    );
+    const showOfflineRecs = (activePlayItem?.isOffline || currentVideo?.isCached || !watchDetails) && offlineRecs.length > 0;
+
+    if (showOfflineRecs) {
+      if (offlineRecs.length > 0) {
+        const nextVideo = offlineRecs[0];
+        navigate('watch', { v: nextVideo.id });
+      }
+    } else {
+      if (feedVideos.length === 0) return;
+      const currentIndex = feedVideos.findIndex(v => v.id === route.videoId);
+      const nextIndex = currentIndex !== -1 ? currentIndex + 1 : 0;
+      
+      if (nextIndex < feedVideos.length) {
+        const nextVideo = feedVideos[nextIndex];
+        navigate('watch', { v: nextVideo.id });
+      }
     }
   };
 
@@ -1531,6 +1550,7 @@ export default function App() {
                     ref={videoContainerRef}
                     onMouseMove={resetControlsTimeout}
                     onMouseLeave={() => videoIsPlaying && setShowVideoControls(false)}
+                    onClick={() => setShowSettingsMenu(false)}
                     className="relative aspect-video bg-black rounded-2xl overflow-hidden group select-none shadow-2xl border border-white/5 z-10"
                   >
                     <video 
@@ -1588,6 +1608,155 @@ export default function App() {
                           <Play className="w-6 h-6 fill-current ml-1" />
                         )}
                       </div>
+                    </div>
+
+                    {/* Settings Popover Overlay */}
+                    <div 
+                      onClick={(e) => e.stopPropagation()} // Prevent trigger play/pause when clicking settings options
+                      className={`absolute bottom-16 right-4 z-30 w-64 bg-zinc-950/95 backdrop-blur-lg border border-white/10 rounded-xl p-3.5 shadow-2xl flex flex-col gap-2.5 text-xs text-white transition-all duration-300 ${
+                        showVideoControls && showSettingsMenu ? 'opacity-100 translate-y-0 scale-100' : 'opacity-0 translate-y-2 scale-95 pointer-events-none'
+                      }`}
+                    >
+                      {settingsSubMenu === 'main' ? (
+                        <>
+                          <div className="font-bold text-slate-200 border-b border-white/5 pb-1.5 flex items-center justify-between select-none">
+                            <span>Settings</span>
+                            <span className="text-[10px] text-slate-500 font-mono">v5.0</span>
+                          </div>
+                          
+                          {/* Autoplay setting row */}
+                          <div className="flex items-center justify-between py-1 hover:bg-white/5 px-1.5 rounded transition">
+                            <span className="font-semibold text-slate-300 select-none">Autoplay Next Video</span>
+                            <button
+                              onClick={() => setAutoplayEnabled(!autoplayEnabled)}
+                              className={`relative w-8 h-4.5 rounded-full transition-colors duration-200 focus:outline-none cursor-pointer border border-white/10 ${
+                                autoplayEnabled ? 'bg-rose-500' : 'bg-white/10'
+                              }`}
+                            >
+                              <span 
+                                className={`absolute top-0.5 left-0.5 w-3.5 h-3.5 rounded-full bg-white transition-transform duration-200 ${
+                                  autoplayEnabled ? 'translate-x-3.5' : 'translate-x-0'
+                                }`}
+                              />
+                            </button>
+                          </div>
+
+                          {/* Quality sub-menu selection row */}
+                          <div 
+                            onClick={() => setSettingsSubMenu('quality')}
+                            className="flex items-center justify-between py-1.5 hover:bg-white/5 px-1.5 rounded transition cursor-pointer"
+                          >
+                            <span className="font-semibold text-slate-300 select-none">Quality</span>
+                            <div className="flex items-center gap-1 text-slate-400">
+                              <span>
+                                {activeFormat ? `${activeFormat.quality}${activeFormat.ext === 'mp3' ? 'kbps' : 'p'}` : 'Auto'}
+                              </span>
+                              <ChevronDown className="w-3.5 h-3.5 transform -rotate-90 text-slate-500" />
+                            </div>
+                          </div>
+
+                          {/* Cache on Server on-demand */}
+                          <div className="flex items-center justify-between py-1.5 hover:bg-white/5 px-1.5 rounded transition">
+                            <span className="font-semibold text-slate-300 select-none">Server Cache</span>
+                            {activeFormat?.isCached ? (
+                              <span className="text-emerald-400 font-bold select-none">Completed</span>
+                            ) : (serverCacheProgress > 0 && serverCacheProgress < 100) ? (
+                              <span className="text-rose-400 font-mono select-none">Caching: {serverCacheProgress}%</span>
+                            ) : (
+                              <button
+                                onClick={() => {
+                                  if (activeFormat) {
+                                    console.log(`Triggering manual on-demand caching for quality: ${activeFormat.quality}`);
+                                    fetch(`/api/v5/stream/${route.videoId}?ext=${activeFormat.ext}&quality=${activeFormat.quality}&cache=true&ttl=${cacheTtl}`).catch(() => {});
+                                    startedAsUncachedRef.current = true; // Let the poll loop know we should switch to progressive when done
+                                  }
+                                }}
+                                className="text-rose-400 hover:text-rose-300 font-bold cursor-pointer hover:underline"
+                              >
+                                Cache Now
+                              </button>
+                            )}
+                          </div>
+                        </>
+                      ) : (
+                        <>
+                          <div 
+                            onClick={() => setSettingsSubMenu('main')}
+                            className="font-bold text-slate-200 border-b border-white/5 pb-1.5 flex items-center gap-1.5 cursor-pointer hover:text-white select-none"
+                          >
+                            <ChevronLeft className="w-3.5 h-3.5" />
+                            <span>Select Quality</span>
+                          </div>
+                          
+                          <div className="max-h-56 overflow-y-auto flex flex-col gap-1 pr-1 scrollbar-thin">
+                            {/* Video section */}
+                            <div className="text-[9px] text-slate-500 font-bold uppercase tracking-wider px-1.5 mt-1 select-none">
+                              Video (MP4)
+                            </div>
+                            {videoFormats.map((f) => {
+                              const isSaved = history.some(item => item.id === watchDetails?.id && item.ext === f.ext && item.quality === f.quality && item.savedInBrowser);
+                              const isSelected = activeFormat?.token === f.token;
+                              return (
+                                <button
+                                  key={f.token}
+                                  onClick={() => {
+                                    if (videoRef.current && watchDetails) {
+                                      saveResumePosition(watchDetails.id, videoRef.current.currentTime);
+                                      wasPlayingBeforeSwitchRef.current = !videoRef.current.paused;
+                                      isFormatSwitchRef.current = true;
+                                    }
+                                    selectFormat(f);
+                                    localStorage.setItem('tubehub_last_ext', f.ext);
+                                    localStorage.setItem('tubehub_last_quality', f.quality);
+                                    setSettingsSubMenu('main');
+                                  }}
+                                  className={`flex items-center justify-between py-1.5 px-2 rounded text-left transition cursor-pointer ${
+                                    isSelected ? 'bg-rose-500/10 text-rose-400 font-bold' : 'hover:bg-white/5 text-slate-300'
+                                  }`}
+                                >
+                                  <span>{f.quality}p</span>
+                                  <span className="text-[9px] font-mono opacity-80">
+                                    {isSaved ? 'Offline' : (f.isCached ? 'Cached' : 'Direct')}
+                                  </span>
+                                </button>
+                              );
+                            })}
+
+                            {/* Audio section */}
+                            <div className="text-[9px] text-slate-500 font-bold uppercase tracking-wider px-1.5 mt-2 select-none">
+                              Audio (MP3)
+                            </div>
+                            {audioFormats.map((f) => {
+                              const isSaved = history.some(item => item.id === watchDetails?.id && item.ext === f.ext && item.quality === f.quality && item.savedInBrowser);
+                              const isSelected = activeFormat?.token === f.token;
+                              return (
+                                <button
+                                  key={f.token}
+                                  onClick={() => {
+                                    if (videoRef.current && watchDetails) {
+                                      saveResumePosition(watchDetails.id, videoRef.current.currentTime);
+                                      wasPlayingBeforeSwitchRef.current = !videoRef.current.paused;
+                                      isFormatSwitchRef.current = true;
+                                    }
+                                    selectFormat(f);
+                                    localStorage.setItem('tubehub_last_ext', f.ext);
+                                    localStorage.setItem('tubehub_last_quality', f.quality);
+                                    setSettingsSubMenu('main');
+                                  }}
+                                  className={`flex items-center justify-between py-1.5 px-2 rounded text-left transition cursor-pointer ${
+                                    isSelected ? 'bg-rose-500/10 text-rose-400 font-bold' : 'hover:bg-white/5 text-slate-300'
+                                  }`}
+                                >
+                                  <span>{f.quality}kbps</span>
+                                  <span className="text-[9px] font-mono opacity-80">
+                                    {isSaved ? 'Offline' : (f.isCached ? 'Cached' : 'Direct')}
+                                  </span>
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </>
+                      )}
                     </div>
 
                     {/* Bottom controls bar */}
@@ -1688,17 +1857,100 @@ export default function App() {
                           </div>
                         </div>
 
-                        {/* Right side controls: PiP, Fullscreen */}
+                        {/* Right side controls: Save Offline, Download, Settings, PiP, Fullscreen */}
                         <div className="flex items-center gap-3">
+                          {/* Save Offline to Browser */}
+                          <button
+                            onClick={(e) => { e.stopPropagation(); handleSaveToBrowser(); }}
+                            disabled={!activeFormat || isSavingToBrowser || (status === 'converting' && pendingAction === 'save') || activeIsSavedToBrowser}
+                            className={`p-1 cursor-pointer transition ${
+                              activeIsSavedToBrowser
+                                ? 'text-emerald-400 cursor-default'
+                                : !activeFormat
+                                  ? 'opacity-40 text-slate-500 cursor-not-allowed'
+                                  : (isSavingToBrowser || (status === 'converting' && pendingAction === 'save'))
+                                    ? 'text-rose-400 cursor-wait'
+                                    : 'text-slate-300 hover:text-white'
+                            }`}
+                            title={
+                              activeIsSavedToBrowser
+                                ? "Saved to browser offline library"
+                                : !activeFormat
+                                  ? "Select a format in Settings to save offline"
+                                  : (isSavingToBrowser || (status === 'converting' && pendingAction === 'save'))
+                                    ? `Saving to browser (${progress}%)...`
+                                    : "Save offline to browser storage"
+                            }
+                          >
+                            {(isSavingToBrowser || (status === 'converting' && pendingAction === 'save')) ? (
+                              <div className="relative w-4.5 h-4.5 flex items-center justify-center">
+                                <svg className="absolute inset-0 w-full h-full animate-spin" viewBox="0 0 36 36">
+                                  <circle cx="18" cy="18" r="16" fill="none" className="stroke-white/10" strokeWidth="3" />
+                                  <circle cx="18" cy="18" r="16" fill="none" className="stroke-rose-500" strokeWidth="3" strokeDasharray="100" strokeDashoffset={100 - (progress || 0)} />
+                                </svg>
+                                <span className="text-[6.5px] font-bold text-rose-400 select-none absolute mt-0.5">{progress}</span>
+                              </div>
+                            ) : (
+                              <Library className="w-4.5 h-4.5" />
+                            )}
+                          </button>
+
+                          {/* Download File to PC */}
+                          <button
+                            onClick={(e) => { e.stopPropagation(); handleDownload(); }}
+                            disabled={!activeFormat || (status === 'converting' && pendingAction === 'download')}
+                            className={`p-1 cursor-pointer transition ${
+                              !activeFormat
+                                ? 'opacity-40 text-slate-500 cursor-not-allowed'
+                                : (status === 'converting' && pendingAction === 'download')
+                                  ? 'text-rose-400 cursor-wait'
+                                  : 'text-slate-300 hover:text-white'
+                            }`}
+                            title={
+                              !activeFormat
+                                ? "Select a format in Settings to download"
+                                : (status === 'converting' && pendingAction === 'download')
+                                  ? `Converting & downloading (${progress}%)...`
+                                  : "Download file to computer"
+                            }
+                          >
+                            {(status === 'converting' && pendingAction === 'download') ? (
+                              <div className="relative w-4.5 h-4.5 flex items-center justify-center">
+                                <svg className="absolute inset-0 w-full h-full animate-spin" viewBox="0 0 36 36">
+                                  <circle cx="18" cy="18" r="16" fill="none" className="stroke-white/10" strokeWidth="3" />
+                                  <circle cx="18" cy="18" r="16" fill="none" className="stroke-rose-500" strokeWidth="3" strokeDasharray="100" strokeDashoffset={100 - (progress || 0)} />
+                                </svg>
+                                <span className="text-[6.5px] font-bold text-rose-400 select-none absolute mt-0.5">{progress}</span>
+                              </div>
+                            ) : (
+                              <Download className="w-4.5 h-4.5" />
+                            )}
+                          </button>
+
+                          {/* Settings Gear */}
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setShowSettingsMenu(!showSettingsMenu);
+                              setSettingsSubMenu('main');
+                            }}
+                            className={`p-1 cursor-pointer transition duration-300 ${
+                              showSettingsMenu ? 'text-rose-400 rotate-45 scale-105' : 'text-slate-300 hover:text-white'
+                            }`}
+                            title="Playback settings"
+                          >
+                            <Settings className="w-4.5 h-4.5" />
+                          </button>
+
                           <button 
-                            onClick={togglePiP}
+                            onClick={(e) => { e.stopPropagation(); togglePiP(); }}
                             className="text-slate-300 hover:text-white p-1 cursor-pointer"
                             title="Picture-in-Picture"
                           >
                             <PictureInPicture className="w-4.5 h-4.5" />
                           </button>
                           <button 
-                            onClick={toggleFullscreen}
+                            onClick={(e) => { e.stopPropagation(); toggleFullscreen(); }}
                             className="text-slate-300 hover:text-white p-1 cursor-pointer"
                             title="Fullscreen"
                           >
@@ -1759,182 +2011,6 @@ export default function App() {
                         </div>
                       </div>
 
-                      {/* Video actions */}
-                      <div className="flex items-center gap-2">
-                        {/* Autoplay toggler */}
-                        <button
-                          id="watch-btn-autoplay"
-                          onClick={() => setAutoplayEnabled(!autoplayEnabled)}
-                          className={`px-3 py-1.5 rounded-full text-xs font-semibold border flex items-center gap-1.5 transition cursor-pointer ${
-                            autoplayEnabled 
-                              ? 'bg-rose-500/10 border-rose-500/20 text-rose-400' 
-                              : 'bg-white/5 border-white/10 text-slate-400 hover:text-white'
-                          }`}
-                        >
-                          <span>Autoplay</span>
-                          <span className="text-[10px] px-1 bg-white/10 rounded">{autoplayEnabled ? 'ON' : 'OFF'}</span>
-                        </button>
- 
-                        {/* Format selector for offline conversion */}
-                        <div className="flex items-center gap-1.5 bg-white/5 border border-white/10 rounded-full px-2 py-0.5">
-                          <span className="text-[10px] text-slate-400 pl-1 font-semibold">Format:</span>
-                          <select 
-                            id="watch-select-format"
-                            value={activeFormat?.token || ''}
-                            onChange={(e) => {
-                              const token = e.target.value;
-                              const matches = [...videoFormats, ...audioFormats];
-                              const found = matches.find(f => f.token === token);
-                              if (found) {
-                                // Save exact current playback position before changing format source
-                                if (videoRef.current && watchDetails) {
-                                  saveResumePosition(watchDetails.id, videoRef.current.currentTime);
-                                  wasPlayingBeforeSwitchRef.current = !videoRef.current.paused;
-                                  isFormatSwitchRef.current = true;
-                                }
-                                selectFormat(found);
-                                localStorage.setItem('tubehub_last_ext', found.ext);
-                                localStorage.setItem('tubehub_last_quality', found.quality);
-                              }
-                            }}
-                            className="bg-transparent text-xs font-semibold text-slate-200 py-1 focus:outline-none cursor-pointer"
-                          >
-                            <option value="" disabled>Select Format...</option>
-                            <optgroup label="Video (MP4)">
-                              {videoFormats.map((f) => {
-                                const isSaved = history.some(item => item.id === watchDetails.id && item.ext === f.ext && item.quality === f.quality && item.savedInBrowser);
-                                const isCachedOnServer = f.isCached;
-                                return (
-                                  <option key={f.token} value={f.token}>
-                                    {f.quality}p (.mp4){isSaved ? ' (Saved Offline)' : (isCachedOnServer ? ' (Cached)' : '')}
-                                  </option>
-                                );
-                              })}
-                            </optgroup>
-                            <optgroup label="Audio (MP3)">
-                              {audioFormats.map((f) => {
-                                const isSaved = history.some(item => item.id === watchDetails.id && item.ext === f.ext && item.quality === f.quality && item.savedInBrowser);
-                                const isCachedOnServer = f.isCached;
-                                return (
-                                  <option key={f.token} value={f.token}>
-                                    {f.quality}kbps (.mp3){isSaved ? ' (Saved Offline)' : (isCachedOnServer ? ' (Cached)' : '')}
-                                  </option>
-                                );
-                              })}
-                            </optgroup>
-                          </select>
-                        </div>
- 
-                        {/* Save to Browser Offline Button */}
-                        <button
-                          id="watch-btn-save-offline"
-                          onClick={() => handleSaveToBrowser()}
-                          disabled={!activeFormat || isSavingToBrowser || (status === 'converting' && pendingAction === 'save') || activeIsSavedToBrowser}
-                          className={`p-2 rounded-full transition border relative flex items-center justify-center ${
-                            activeIsSavedToBrowser 
-                              ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-400 cursor-default' 
-                              : !activeFormat
-                                ? 'opacity-40 border-white/5 text-slate-500 cursor-not-allowed'
-                                : (isSavingToBrowser || (status === 'converting' && pendingAction === 'save'))
-                                  ? 'bg-white/5 border-white/5 text-slate-400 cursor-wait'
-                                  : 'bg-white/5 border-white/10 text-slate-300 hover:text-white active:scale-95 cursor-pointer'
-                          }`}
-                          title={
-                            activeIsSavedToBrowser 
-                              ? "Saved to browser offline library" 
-                              : !activeFormat 
-                                ? "Select a format first to enable offline saving" 
-                                : (isSavingToBrowser || (status === 'converting' && pendingAction === 'save'))
-                                  ? `Converting & saving in background (${progress}%)...` 
-                                  : "Save offline to browser storage (will convert first if needed)"
-                          }
-                        >
-                          {(isSavingToBrowser || (status === 'converting' && pendingAction === 'save')) ? (
-                            <div className="relative w-4.5 h-4.5 flex items-center justify-center">
-                              <svg className={`absolute inset-0 w-full h-full transform -rotate-90 ${isSavingToBrowser ? 'animate-spin' : ''}`} viewBox="0 0 36 36">
-                                <circle
-                                  cx="18"
-                                  cy="18"
-                                  r="16"
-                                  fill="none"
-                                  className="stroke-white/10"
-                                  strokeWidth="3.5"
-                                />
-                                <circle
-                                  cx="18"
-                                  cy="18"
-                                  r="16"
-                                  fill="none"
-                                  className="stroke-rose-500 transition-all duration-300"
-                                  strokeWidth="3.5"
-                                  strokeDasharray="100.5"
-                                  strokeDashoffset={isSavingToBrowser ? 30 : (100.5 - (progress || 0))}
-                                  strokeLinecap="round"
-                                />
-                              </svg>
-                              {(status === 'converting' && pendingAction === 'save') && (
-                                <span className="text-[7.5px] font-bold font-mono text-rose-400 absolute select-none">
-                                  {progress}
-                                </span>
-                              )}
-                            </div>
-                          ) : (
-                            <Library className="w-4.5 h-4.5" />
-                          )}
-                        </button>
-                        
-                        {/* Download to File System Button */}
-                        <button
-                          id="watch-btn-download"
-                          onClick={() => handleDownload()}
-                          disabled={!activeFormat || (status === 'converting' && pendingAction === 'download')}
-                          className={`p-2 rounded-full transition border relative flex items-center justify-center ${
-                            !activeFormat 
-                              ? 'opacity-40 border-white/5 text-slate-500 cursor-not-allowed'
-                              : (status === 'converting' && pendingAction === 'download')
-                                ? 'bg-white/5 border-white/5 text-slate-400 cursor-wait'
-                                : 'bg-rose-600 hover:bg-rose-700 text-white active:scale-95 cursor-pointer border-rose-500/20'
-                          }`}
-                          title={
-                            !activeFormat 
-                              ? "Select a format first to enable downloading" 
-                              : (status === 'converting' && pendingAction === 'download')
-                                ? `Converting & downloading in background (${progress}%)...` 
-                                : "Download file to computer (will convert first if needed)"
-                          }
-                        >
-                          {(status === 'converting' && pendingAction === 'download') ? (
-                            <div className="relative w-4.5 h-4.5 flex items-center justify-center">
-                              <svg className="absolute inset-0 w-full h-full transform -rotate-90" viewBox="0 0 36 36">
-                                <circle
-                                  cx="18"
-                                  cy="18"
-                                  r="16"
-                                  fill="none"
-                                  className="stroke-white/10"
-                                  strokeWidth="3.5"
-                                />
-                                <circle
-                                  cx="18"
-                                  cy="18"
-                                  r="16"
-                                  fill="none"
-                                  className="stroke-rose-500 transition-all duration-300"
-                                  strokeWidth="3.5"
-                                  strokeDasharray="100.5"
-                                  strokeDashoffset={100.5 - (progress || 0)}
-                                  strokeLinecap="round"
-                                />
-                              </svg>
-                              <span className="text-[7.5px] font-bold font-mono text-rose-400 absolute select-none">
-                                {progress}
-                              </span>
-                            </div>
-                          ) : (
-                            <Download className="w-4.5 h-4.5" />
-                          )}
-                        </button>
-                      </div>
                     </div>
  
                     {saveError && (

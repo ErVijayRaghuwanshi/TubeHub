@@ -32,7 +32,7 @@ Decouple client browsers from tracking pixels and metadata collection by externa
 * Search results and trending feeds are loaded using server-side extraction libraries.
 
 ### 2. Bandwidth Minimization & Data Reduction
-* **No Duplicate Downloads**: If a video format (e.g. 1080p MP4) is already cached on the server, requests for lower resolutions (e.g. 360p) will play the cached 1080p directly.
+* **No Duplicate Downloads**: If a video format (e.g. 4K MP4) is already cached on the server, requests for lower resolutions (e.g. 1080p) will play the cached 4K directly.
 * **Concurrency Protection (Progress Syncing)**: Co-download requests for the same media qualities are queued and synced directly to the active download thread instead of spawning redundant duplicate CLI transcoding processes.
 * **Local Transcoding**: If a user requests a `.mp3` stream of a video that is already cached as an `.mp4` on the server, the backend transcodes the audio on-the-fly and pipes it, saving the need to fetch anything from the internet.
 

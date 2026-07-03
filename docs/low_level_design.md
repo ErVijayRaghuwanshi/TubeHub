@@ -14,7 +14,7 @@ downloads/
 └── cache/                    # Persistent backend media cache folder
     └── [videoId]/            # Unique video ID subfolders (e.g. 2vYyHb34upc)
         ├── thumbnail.jpg     # Pre-cached video thumbnail
-        ├── cache_1080.mp4    # Completed/Active cache video format (1080p)
+        ├── cache_2160.mp4    # Completed/Active cache video format (2160p / 4K)
         └── cache_320.mp3     # Completed/Active cache audio format (320kbps)
 ```
 

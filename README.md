@@ -7,13 +7,14 @@
 
 ## 🌟 Key Features
 
-### 1. Adaptive HD Playback (DASH Manifest Compiler)
-*   **Dynamic Multi-Representation Compiler:** Uncached videos stream using **DASH (Dynamic Adaptive Streaming over HTTP)**. The backend dynamically compiles a custom multi-representation DASH XML manifest (`manifest.mpd`) containing parallel-mapped tracks for all standard resolutions (`[1080, 720, 480, 360]`), correctly aligning cinematic/vertical aspect ratio heights (e.g. standard `1080` matching actual `1012p` format).
+### 1. Adaptive HD & UHD Playback (DASH Manifest Compiler)
+*   **Dynamic Multi-Representation Compiler:** Uncached videos stream using **DASH (Dynamic Adaptive Streaming over HTTP)**. The backend dynamically compiles a custom multi-representation DASH XML manifest (`manifest.mpd`) containing parallel-mapped tracks for resolutions up to **8K (4320p), 4K (2160p), 2K (1440p)**, 1080p, 720p, 480p, and 360p, aligning cinematic/vertical custom aspect ratio heights.
+*   **Intelligent Codec Isolation:** To maintain absolute stream stability inside `dash.js`, the compiler automatically matches the codec selection to avoid browser decoder crashes (e.g. standard resolutions below 1080p stream using `avc1` / H.264, while UHD resolutions trigger the modern `av01` / AV1 codec representation list).
 *   **dash.js v5 Client Integration:** Playback is managed via a custom `dash.js` player configuration that overrides ABR to force manual quality locks in the browser without resetting the video element buffer, enabling **smooth, instant quality changes** without interrupts.
 
 ### 2. YouTube Converter & Transcoding Selection
 *   **Audio Extractor (MP3):** Transcode audio streams in multiple qualities: `320 kbps (Ultra)`, `256 kbps (High)`, `192 kbps (Medium)`, and `128 kbps (Standard)`.
-*   **Video Downloader (MP4):** Transcode video streams in multiple resolutions: `1080p (Full HD)`, `720p (HD)`, `480p (SD)`, and `360p (Mobile)`.
+*   **Video Downloader (MP4):** Transcode video streams in multiple resolutions: `4320p (8K)`, `2160p (4K)`, `1440p (2K)`, `1080p (Full HD)`, `720p (HD)`, `480p (SD)`, and `360p (Mobile)`.
 *   **Security Check Integration:** Seamless human verification checks powered by Cloudflare Turnstile inside a sleek dark theme widget.
 
 ### 3. Unified Conversion Caching & Concurrency

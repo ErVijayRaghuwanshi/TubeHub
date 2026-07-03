@@ -119,7 +119,7 @@ sequenceDiagram
     "isCached": true,
     "formats": {
       "audio": [{ "token": "audio-320-...", "quality": 320, "ext": "mp3", "isCached": false }],
-      "video": [{ "token": "video-720-...", "quality": 720, "ext": "mp4", "isCached": true }]
+      "video": [{ "token": "video-2160-...", "quality": 2160, "ext": "mp4", "isCached": true }]
     }
   }
   ```
@@ -129,7 +129,7 @@ sequenceDiagram
 * **Query Parameters**:
   * `cache`: `true` or `false` (default `false`, spins up a background caching thread for the initial selected resolution)
   * `ttl`: Cache duration in seconds (optional)
-* **Response**: XML content (`Content-Type: application/dash+xml`) containing representations for all standard qualities (`1080`, `720`, `480`, `360`).
+* **Response**: XML content (`Content-Type: application/dash+xml`) containing representations for all standard qualities up to 8K (`4320`, `2160`, `1440`, `1080`, `720`, `480`, `360`). If target quality is > 1080p, representations are compiled using the `av01` (AV1) codec, otherwise standard `avc1` (H.264) is returned.
 
 ### 3. `GET /api/v5/stream/:videoId`
 * **Purpose**: Streams cached MP4/MP3 files directly or plays transcoded audio on-the-fly.

@@ -564,14 +564,28 @@ app.get('/api/v5/stream/:videoId/manifest.mpd', async (req, res) => {
       return res.status(404).send('DASH compatible audio format not found.');
     }
 
-    // Find the best video-only MP4 format (AVC/H264) for each of the standard target qualities: 1080, 720, 480, 360
-    const targetQualities = [1080, 720, 480, 360];
+    const reqQuality = parseInt(quality, 10) || 720;
+    
+    // Choose codec based on target quality to avoid mixing codecs (AVC vs AV1) in the same AdaptationSet
+    let useAV1 = reqQuality > 1080;
+    if (useAV1) {
+      const hasAV1 = formats.some(f => f.vcodec && f.vcodec.startsWith('av01') && f.ext === 'mp4');
+      if (!hasAV1) {
+        useAV1 = false; // Fallback to AVC/H264 if no AV1 codec is found
+      }
+    }
+
+    const codecPrefix = useAV1 ? 'av01' : 'avc1';
+    const targetQualities = useAV1 
+      ? [4320, 2160, 1440, 1080, 720, 480, 360] 
+      : [1080, 720, 480, 360];
+
     const uniqueVideoFormats = [];
     const seenFormatIds = new Set();
 
     for (const q of targetQualities) {
       const bestF = formats
-        .filter(f => f.vcodec && f.vcodec !== 'none' && f.acodec === 'none' && f.ext === 'mp4' && f.vcodec.startsWith('avc1'))
+        .filter(f => f.vcodec && f.vcodec !== 'none' && f.acodec === 'none' && f.ext === 'mp4' && f.vcodec.startsWith(codecPrefix))
         .filter(f => f.height && f.height <= q)
         .sort((a, b) => (b.height || 0) - (a.height || 0) || (b.tbr || 0) - (a.tbr || 0))[0];
 
@@ -916,7 +930,7 @@ app.get('/api/v5/info/:videoId', async (req, res) => {
     const formats = output.formats || [];
     const videoFormats = [];
     
-    const heights = [1080, 720, 480, 360];
+    const heights = [4320, 2160, 1440, 1080, 720, 480, 360];
     heights.forEach(h => {
       const hasRes = formats.some(f => f.height === h);
       if (hasRes) {
