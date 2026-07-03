@@ -56,6 +56,21 @@ const getVideoDir = (videoId) => {
 
 
 
+// Helper to fetch the best available quality thumbnail from YouTube
+const fetchBestThumbnail = async (videoId) => {
+  const qualities = ['maxresdefault.jpg', 'sddefault.jpg', 'hqdefault.jpg'];
+  for (const q of qualities) {
+    const url = `https://img.youtube.com/vi/${videoId}/${q}`;
+    try {
+      const res = await fetch(url);
+      if (res.ok) {
+        return res;
+      }
+    } catch (e) {}
+  }
+  return null;
+};
+
 // Detect FFmpeg presence
 exec('ffmpeg -version', (err) => {
   if (!err) {
@@ -251,16 +266,15 @@ app.get('/api/v5/thumbnail/:videoId', async (req, res) => {
     }
 
     // 2. Fetch from YouTube and save to local backend cache
-    const url = `https://img.youtube.com/vi/${videoId}/hqdefault.jpg`;
-    const response = await fetch(url);
-    if (response.ok) {
+    const response = await fetchBestThumbnail(videoId);
+    if (response && response.ok) {
       const arrayBuffer = await response.arrayBuffer();
       const buffer = Buffer.from(arrayBuffer);
       fs.writeFileSync(thumbnailPath, buffer);
       return res.sendFile(thumbnailPath);
     }
     
-    throw new Error(`YouTube thumbnail fetch returned status ${response.status}`);
+    throw new Error(`YouTube thumbnail fetch failed`);
   } catch (err) {
     console.error(`Failed to fetch/cache thumbnail for video ${videoId}:`, err);
     res.status(404).send('Thumbnail not found.');
@@ -989,9 +1003,9 @@ app.get('/api/v5/info/:videoId', async (req, res) => {
     // Fetch info and cache the thumbnail on server disk in the background
     const thumbnailPath = path.join(videoDir, 'thumbnail.jpg');
     if (!fs.existsSync(thumbnailPath)) {
-      fetch(`https://img.youtube.com/vi/${videoId}/hqdefault.jpg`)
+      fetchBestThumbnail(videoId)
         .then(async (response) => {
-          if (response.ok) {
+          if (response && response.ok) {
             const arrayBuffer = await response.arrayBuffer();
             const buffer = Buffer.from(arrayBuffer);
             fs.writeFileSync(thumbnailPath, buffer);
