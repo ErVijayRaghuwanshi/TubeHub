@@ -1757,19 +1757,39 @@ export default function App() {
 
                     {/* Vinyl Record Player Overlay for Audio formats */}
                     {activePlayItem?.ext === 'mp3' && (
-                      <div className="absolute inset-0 bg-[#06080c] flex flex-col items-center justify-center pointer-events-none select-none z-10">
-                        {/* Glowing Background Radial Blur */}
-                        <div className="absolute w-[320px] h-[320px] sm:w-[420px] sm:h-[420px] rounded-full bg-rose-500/10 blur-[90px] -z-10 pointer-events-none" />
-                        
-                        {/* Thumbnail Disc Container */}
+                      <div className="absolute inset-0 bg-black flex flex-col items-center justify-center pointer-events-none select-none z-10 overflow-hidden">
+                        {/* Background: Blurry Full-size Rectangular Thumbnail */}
+                        <div className="absolute inset-0 w-full h-full -z-20 opacity-35 blur-[24px] scale-105 pointer-events-none">
+                          {activePlayItem?.isOffline ? (
+                            <OfflineThumbnail 
+                              storageId={activePlayItem.id} 
+                              fallbackId={activePlayItem.id}
+                              className="w-full h-full object-cover" 
+                            />
+                          ) : (
+                            <img 
+                              src={`/api/v5/thumbnail/${route.videoId}`} 
+                              alt="" 
+                              className="w-full h-full object-cover"
+                              onError={(e) => {
+                                e.target.style.display = 'none';
+                              }}
+                            />
+                          )}
+                        </div>
+
+                        {/* Dark Overlay Vignette for Contrast */}
+                        <div className="absolute inset-0 bg-gradient-to-t from-black via-black/40 to-black/70 -z-10" />
+
+                        {/* Circular Disc Container */}
                         <div 
-                          className="relative w-[240px] h-[240px] sm:w-[300px] sm:h-[300px] md:w-[340px] md:h-[340px] rounded-full overflow-hidden border border-white/10 shadow-2xl flex items-center justify-center animate-spin bg-zinc-950"
+                          className="relative w-[180px] h-[180px] sm:w-[240px] sm:h-[240px] md:w-[280px] md:h-[280px] rounded-full overflow-hidden border-[6px] border-white/10 shadow-[0_25px_50px_-12px_rgba(0,0,0,0.8)] flex items-center justify-center animate-spin bg-zinc-900"
                           style={{ 
                             animationPlayState: videoIsPlaying ? 'running' : 'paused',
                             animationDuration: '12s'
                           }}
                         >
-                          {/* Full cover Thumbnail */}
+                          {/* Circular Thumbnail Image inside the Disc */}
                           {activePlayItem?.isOffline ? (
                             <OfflineThumbnail 
                               storageId={activePlayItem.id} 
@@ -1788,20 +1808,20 @@ export default function App() {
                             />
                           )}
                           
-                          {/* Radial overlay to simulate shiny CD surface reflection */}
-                          <div className="absolute inset-0 bg-[linear-gradient(135deg,_rgba(255,255,255,0.15)_0%,_transparent_50%,_rgba(0,0,0,0.4)_100%)] pointer-events-none rounded-full" />
-                          <div className="absolute inset-0 bg-[radial-gradient(circle_at_center,_transparent_60%,_rgba(0,0,0,0.6)_100%)] pointer-events-none rounded-full" />
+                          {/* Shiny CD surface reflection overlay */}
+                          <div className="absolute inset-0 bg-[linear-gradient(135deg,_rgba(255,255,255,0.12)_0%,_transparent_50%,_rgba(0,0,0,0.45)_100%)] pointer-events-none rounded-full" />
+                          <div className="absolute inset-0 bg-[radial-gradient(circle_at_center,_transparent_55%,_rgba(0,0,0,0.5)_100%)] pointer-events-none rounded-full" />
                           
-                          {/* Spindle Hole in the absolute center */}
-                          <div className="absolute w-6 h-6 rounded-full bg-[#0a0d14] border border-white/20 shadow-[inset_0_2px_4px_rgba(0,0,0,0.6)] animate-none" />
+                          {/* Center Spindle Hole */}
+                          <div className="absolute w-5 h-5 rounded-full bg-[#05070a] border border-white/25 shadow-[inset_0_2px_4px_rgba(0,0,0,0.6)] animate-none" />
                         </div>
 
-                        {/* Title & Artist below Disc */}
-                        <div className="mt-4 px-4 text-center select-none max-w-sm">
-                          <h4 className="text-xs sm:text-sm font-semibold text-white/95 line-clamp-1">
+                        {/* Title & State below Disc */}
+                        <div className="mt-4 px-4 text-center select-none max-w-sm z-20">
+                          <h4 className="text-xs sm:text-sm font-bold text-white leading-snug drop-shadow-md line-clamp-1">
                             {activePlayItem?.title || 'Audio Stream'}
                           </h4>
-                          <span className="text-[10px] text-slate-400 mt-1 block uppercase tracking-widest font-mono">
+                          <span className="text-[9px] text-rose-400 mt-1 block uppercase tracking-widest font-extrabold drop-shadow">
                             {videoIsPlaying ? 'Playing Audio' : 'Paused'}
                           </span>
                         </div>
