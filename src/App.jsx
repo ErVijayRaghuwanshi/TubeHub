@@ -1764,13 +1764,13 @@ export default function App() {
                             <OfflineThumbnail 
                               storageId={activePlayItem.id} 
                               fallbackId={activePlayItem.id}
-                              className="w-full h-full object-cover" 
+                              className="absolute inset-0 w-full h-full object-cover" 
                             />
                           ) : (
                             <img 
                               src={`/api/v5/thumbnail/${route.videoId}`} 
                               alt="" 
-                              className="w-full h-full object-cover"
+                              className="absolute inset-0 w-full h-full object-cover"
                               onError={(e) => {
                                 e.target.style.display = 'none';
                               }}
@@ -1794,16 +1794,16 @@ export default function App() {
                             <OfflineThumbnail 
                               storageId={activePlayItem.id} 
                               fallbackId={activePlayItem.id}
-                              className="w-full h-full object-cover rounded-full" 
+                              className="absolute inset-0 w-full h-full object-cover rounded-full" 
                             />
                           ) : (
                             <img 
                               src={`/api/v5/thumbnail/${route.videoId}`} 
                               alt="" 
-                              className="w-full h-full object-cover rounded-full"
+                              className="absolute inset-0 w-full h-full object-cover rounded-full"
                               onError={(e) => {
                                 e.target.src = '/favicon.svg';
-                                e.target.className = 'w-16 h-16 opacity-45 rounded-full';
+                                e.target.className = 'absolute w-16 h-16 opacity-45 rounded-full top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2';
                               }}
                             />
                           )}
