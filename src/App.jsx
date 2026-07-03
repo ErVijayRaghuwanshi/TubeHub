@@ -140,6 +140,46 @@ export default function App() {
     return () => window.removeEventListener('popstate', handlePopState);
   }, []);
 
+  const [isOnline, setIsOnline] = useState(navigator.onLine);
+
+  useEffect(() => {
+    const handleOnline = () => setIsOnline(true);
+    const handleOffline = () => setIsOnline(false);
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, []);
+
+  const [isServerOnline, setIsServerOnline] = useState(true);
+  const [serverCachedVideos, setServerCachedVideos] = useState([]);
+
+  useEffect(() => {
+    if (!isOnline) return;
+    
+    const checkServerConnectivity = async () => {
+      try {
+        const res = await fetch('/api/v5/status/network');
+        const data = await res.json();
+        setIsServerOnline(data.online);
+        if (!data.online) {
+          const listRes = await fetch('/api/v5/cache/list');
+          const listData = await listRes.json();
+          setServerCachedVideos(listData);
+        }
+      } catch (e) {
+        console.warn('Failed to check server connectivity:', e);
+        setIsServerOnline(false);
+      }
+    };
+    
+    checkServerConnectivity();
+    const interval = setInterval(checkServerConnectivity, 15000);
+    return () => clearInterval(interval);
+  }, [isOnline]);
+
   // UI layout and search states
   const [sidebarOpen, setSidebarOpen] = useState(() => {
     const saved = localStorage.getItem('tubehub_sidebar_open');
@@ -536,6 +576,10 @@ export default function App() {
 
   // Fetch Home Feed (Trending or Search)
   const loadFeed = useCallback(async (replace = true, pageToken = '') => {
+    if (!navigator.onLine) {
+      setFeedLoading(false);
+      return;
+    }
     setFeedLoading(true);
     setFeedError('');
     try {
@@ -1268,6 +1312,20 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-[#0f0f0f] text-slate-100 flex flex-col font-sans antialiased selection:bg-rose-600/35 selection:text-white">
+      {/* Floating Offline Status Toast Notification */}
+      {!isOnline && (
+        <div className="fixed bottom-6 left-1/2 transform -translate-x-1/2 z-[999] flex items-center gap-2 bg-rose-950/90 border border-rose-500/20 px-4 py-2.5 rounded-full text-xs font-semibold text-rose-300 shadow-2xl backdrop-blur-md animate-bounce select-none">
+          <span className="w-2 h-2 rounded-full bg-rose-500 animate-ping" />
+          <span>Offline Mode: Playing from local browser library</span>
+        </div>
+      )}
+      {/* Floating Server Offline Status Toast */}
+      {isOnline && !isServerOnline && (
+        <div className="fixed bottom-6 left-1/2 transform -translate-x-1/2 z-[999] flex items-center gap-2 bg-amber-950/90 border border-amber-500/20 px-4 py-2.5 rounded-full text-xs font-semibold text-amber-300 shadow-2xl backdrop-blur-md animate-bounce select-none">
+          <span className="w-2 h-2 rounded-full bg-amber-500 animate-ping" />
+          <span>Server Offline: Playing from server-side cache</span>
+        </div>
+      )}
       {/* --- HEADER --- */}
       <header className="sticky top-0 z-40 bg-[#0f0f0f]/90 backdrop-blur-md border-b border-white/5 px-4 h-14 flex items-center justify-between">
         <div className="flex items-center gap-3">
@@ -1411,127 +1469,210 @@ export default function App() {
               ==================================================== */}
           {route.name === 'home' && (
             <div className="flex flex-col gap-6">
-              {/* Category Pills (Only on trending page) */}
-              {!route.query && (
-                <div className="flex items-center gap-2 overflow-x-auto pb-1 scrollbar-thin select-none">
-                  {categories.map((cat) => (
-                    <button
-                      key={cat.id}
-                      onClick={() => setActiveCategory(cat.id)}
-                      className={`px-3 py-1.5 rounded-full text-xs font-semibold shrink-0 transition cursor-pointer ${
-                        activeCategory === cat.id 
-                          ? 'bg-white text-[#0f0f0f]' 
-                          : 'bg-white/5 text-slate-300 hover:bg-white/10 hover:text-white'
-                      }`}
-                    >
-                      {cat.name}
-                    </button>
-                  ))}
-                </div>
-              )}
-
-              {/* Error state */}
-              {feedError && (
-                <div className="p-4 bg-rose-500/10 border border-rose-500/20 text-rose-400 rounded-2xl flex items-center gap-3">
-                  <X className="w-5 h-5 shrink-0" />
-                  <span className="text-sm">{feedError}</span>
-                </div>
-              )}
-
-              {/* Videos Grid */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-x-4 gap-y-8">
-                {feedVideos.map((video) => (
-                  <div 
-                    key={video.id} 
-                    onClick={() => navigate('watch', { v: video.id })}
-                    className="flex flex-col gap-2.5 group cursor-pointer"
+              {!isOnline ? (
+                <div className="flex flex-col items-center justify-center p-12 text-slate-400 gap-4 border border-dashed border-white/10 rounded-2xl mt-8 max-w-xl mx-auto text-center select-none bg-white/5 backdrop-blur shadow-xl">
+                  <Library className="w-16 h-16 stroke-[1] text-rose-500 animate-pulse" />
+                  <h2 className="text-lg font-bold text-white">You're Offline</h2>
+                  <p className="text-sm text-slate-400 leading-relaxed">
+                    TubeHub requires an active internet connection to search and stream new videos. In the meantime, you can play files saved in your local browser library offline.
+                  </p>
+                  <button 
+                    onClick={() => navigate('library')}
+                    className="mt-2 px-6 py-2.5 bg-rose-600 hover:bg-rose-700 text-white rounded-full text-xs font-extrabold shadow-lg transition duration-200 cursor-pointer active:scale-95 border border-rose-500/20"
                   >
-                    {/* Thumbnail box */}
-                    <div className="relative aspect-video rounded-xl overflow-hidden bg-slate-900 border border-white/5 shadow-md">
-                      <img 
-                        src={`/api/v5/thumbnail/${video.id}`} 
-                        alt={video.snippet?.title}
-                        className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
-                        loading="lazy"
-                      />
-                      {/* Duration Overlay */}
-                      {video.contentDetails?.duration && (
-                        <div className="absolute bottom-2 right-2 bg-black/85 text-[10px] font-bold text-white px-1.5 py-0.5 rounded font-mono select-none">
-                          {formatISO8601Duration(video.contentDetails.duration)}
-                        </div>
-                      )}
-                    </div>
-
-                    {/* Metadata details */}
-                    <div className="flex gap-3 px-1">
-                      {/* Mock User Avatar */}
-                      {video.snippet?.channelId ? (
-                        <img 
-                          src={`/api/v5/channel/avatar/${video.snippet.channelId}`} 
-                          alt="" 
-                          className="w-9 h-9 rounded-full object-cover shrink-0 border border-white/10"
-                          onError={(e) => {
-                            e.target.style.display = 'none';
-                            const fallback = e.target.nextSibling;
-                            if (fallback) fallback.style.display = 'flex';
-                          }}
-                        />
-                      ) : null}
-                      <div 
-                        className="w-9 h-9 rounded-full bg-rose-500/15 border border-rose-500/10 text-rose-400 flex items-center justify-center font-bold text-sm shrink-0 select-none"
-                        style={{ display: video.snippet?.channelId ? 'none' : 'flex' }}
-                      >
-                        {video.snippet?.channelTitle?.charAt(0) || 'Y'}
-                      </div>
-                      
-                      <div className="flex flex-col min-w-0">
-                        <span className="text-sm font-semibold text-white leading-tight line-clamp-2 group-hover:text-rose-400 transition-colors" title={video.snippet?.title}>
-                          {video.snippet?.title}
-                        </span>
-                        
-                        <span className="text-xs text-slate-400 mt-1 hover:text-white transition-colors truncate">
-                          {video.snippet?.channelTitle}
-                        </span>
-                        
-                        <div className="flex items-center gap-1.5 text-[11px] text-slate-500 mt-0.5 select-none">
-                          <span>{formatViewCount(video.statistics?.viewCount)}</span>
-                          <span>•</span>
-                          <span>{getRelativeTime(video.snippet?.publishedAt)}</span>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-
-              {/* Load More Trigger */}
-              {feedVideos.length > 0 && !feedLoading && (
-                <div className="flex justify-center mt-6">
-                  <button
-                    onClick={() => loadFeed(false, feedPageToken)}
-                    className="px-6 py-2.5 border border-white/10 hover:bg-white/5 rounded-full text-sm font-semibold transition cursor-pointer active:scale-95"
-                  >
-                    Show More Videos
+                    Go to Offline Library
                   </button>
                 </div>
-              )}
+              ) : !isServerOnline ? (
+                <div className="flex flex-col gap-4">
+                  <div className="flex items-center justify-between border-b border-white/5 pb-2 select-none">
+                    <h1 className="text-lg font-bold text-white flex items-center gap-2">
+                      <Database className="w-5 h-5 text-amber-500" />
+                      <span>Server Caching Library</span>
+                    </h1>
+                    <span className="text-xs text-slate-400">
+                      {serverCachedVideos.length} items cached on server
+                    </span>
+                  </div>
 
-              {/* Loader Grid */}
-              {feedLoading && (
-                <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-x-4 gap-y-8 animate-pulse mt-4">
-                  {[...Array(8)].map((_, i) => (
-                    <div key={i} className="flex flex-col gap-3">
-                      <div className="aspect-video bg-white/5 rounded-xl" />
-                      <div className="flex gap-3">
-                        <div className="w-9 h-9 rounded-full bg-white/5 shrink-0" />
-                        <div className="flex-1 flex flex-col gap-2">
-                          <div className="h-4 bg-white/5 rounded w-11/12" />
-                          <div className="h-3 bg-white/5 rounded w-3/4" />
+                  {serverCachedVideos.length === 0 ? (
+                    <div className="flex flex-col items-center justify-center p-12 text-slate-500 gap-3 border border-dashed border-white/10 rounded-2xl mt-4">
+                      <Database className="w-12 h-12 stroke-[1]" />
+                      <p className="text-sm">No videos cached on the server yet.</p>
+                      <button 
+                        onClick={() => navigate('library')}
+                        className="mt-2 px-4 py-2 bg-rose-600 hover:bg-rose-700 text-white rounded-full text-xs font-bold transition cursor-pointer"
+                      >
+                        Visit Local Browser Library
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-x-4 gap-y-8 mt-2">
+                      {serverCachedVideos.map((video) => (
+                        <div 
+                          key={video.videoId} 
+                          onClick={() => navigate('watch', { v: video.videoId })}
+                          className="flex flex-col gap-2.5 group cursor-pointer relative"
+                        >
+                          <div className="relative aspect-video rounded-xl overflow-hidden bg-slate-900 border border-white/5 shadow-md">
+                            <img 
+                              src={`/api/v5/thumbnail/${video.videoId}`} 
+                              alt={video.title}
+                              className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+                              loading="lazy"
+                              onError={(e) => {
+                                e.target.src = '/favicon.svg';
+                                e.target.className = 'w-16 h-16 mx-auto mt-6 opacity-40';
+                              }}
+                            />
+                            {video.duration && (
+                              <div className="absolute bottom-2 right-2 bg-black/85 text-[10px] font-bold text-white px-1.5 py-0.5 rounded font-mono select-none">
+                                {formatTime(video.duration)}
+                              </div>
+                            )}
+                            <div className="absolute top-2 left-2 bg-amber-500 text-black text-[9px] font-extrabold px-1.5 py-0.5 rounded shadow select-none">
+                              SERVER CACHED
+                            </div>
+                          </div>
+
+                          <div className="flex flex-col min-w-0 px-1">
+                            <span className="text-sm font-semibold text-white leading-tight line-clamp-2 group-hover:text-amber-400 transition-colors" title={video.title}>
+                              {video.title}
+                            </span>
+                            <span className="text-xs text-slate-400 mt-1 truncate">
+                              {video.channelTitle || 'Unknown Channel'}
+                            </span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <>
+                  {/* Category Pills (Only on trending page) */}
+                  {!route.query && (
+                    <div className="flex items-center gap-2 overflow-x-auto pb-1 scrollbar-thin select-none">
+                      {categories.map((cat) => (
+                        <button
+                          key={cat.id}
+                          onClick={() => setActiveCategory(cat.id)}
+                          className={`px-3 py-1.5 rounded-full text-xs font-semibold shrink-0 transition cursor-pointer ${
+                            activeCategory === cat.id 
+                              ? 'bg-white text-[#0f0f0f]' 
+                              : 'bg-white/5 text-slate-300 hover:bg-white/10 hover:text-white'
+                          }`}
+                        >
+                          {cat.name}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* Error state */}
+                  {feedError && (
+                    <div className="p-4 bg-rose-500/10 border border-rose-500/20 text-rose-400 rounded-2xl flex items-center gap-3">
+                      <X className="w-5 h-5 shrink-0" />
+                      <span className="text-sm">{feedError}</span>
+                    </div>
+                  )}
+
+                  {/* Videos Grid */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-x-4 gap-y-8">
+                    {feedVideos.map((video) => (
+                      <div 
+                        key={video.id} 
+                        onClick={() => navigate('watch', { v: video.id })}
+                        className="flex flex-col gap-2.5 group cursor-pointer"
+                      >
+                        {/* Thumbnail box */}
+                        <div className="relative aspect-video rounded-xl overflow-hidden bg-slate-900 border border-white/5 shadow-md">
+                          <img 
+                            src={`/api/v5/thumbnail/${video.id}`} 
+                            alt={video.snippet?.title}
+                            className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+                            loading="lazy"
+                          />
+                          {/* Duration Overlay */}
+                          {video.contentDetails?.duration && (
+                            <div className="absolute bottom-2 right-2 bg-black/85 text-[10px] font-bold text-white px-1.5 py-0.5 rounded font-mono select-none">
+                              {formatISO8601Duration(video.contentDetails.duration)}
+                            </div>
+                          )}
+                        </div>
+
+                        {/* Metadata details */}
+                        <div className="flex gap-3 px-1">
+                          {/* Mock User Avatar */}
+                          {video.snippet?.channelId ? (
+                            <img 
+                              src={`/api/v5/channel/avatar/${video.snippet.channelId}`} 
+                              alt="" 
+                              className="w-9 h-9 rounded-full object-cover shrink-0 border border-white/10"
+                              onError={(e) => {
+                                e.target.style.display = 'none';
+                                const fallback = e.target.nextSibling;
+                                if (fallback) fallback.style.display = 'flex';
+                              }}
+                            />
+                          ) : null}
+                          <div 
+                            className="w-9 h-9 rounded-full bg-rose-500/15 border border-rose-500/10 text-rose-400 flex items-center justify-center font-bold text-sm shrink-0 select-none"
+                            style={{ display: video.snippet?.channelId ? 'none' : 'flex' }}
+                          >
+                            {video.snippet?.channelTitle?.charAt(0) || 'Y'}
+                          </div>
+                          
+                          <div className="flex flex-col min-w-0">
+                            <span className="text-sm font-semibold text-white leading-tight line-clamp-2 group-hover:text-rose-400 transition-colors" title={video.snippet?.title}>
+                              {video.snippet?.title}
+                            </span>
+                            
+                            <span className="text-xs text-slate-400 mt-1 hover:text-white transition-colors truncate">
+                              {video.snippet?.channelTitle}
+                            </span>
+                            
+                            <div className="flex items-center gap-1.5 text-[11px] text-slate-500 mt-0.5 select-none">
+                              <span>{formatViewCount(video.statistics?.viewCount)}</span>
+                              <span>•</span>
+                              <span>{getRelativeTime(video.snippet?.publishedAt)}</span>
+                            </div>
+                          </div>
                         </div>
                       </div>
+                    ))}
+                  </div>
+
+                  {/* Load More Trigger */}
+                  {feedVideos.length > 0 && !feedLoading && (
+                    <div className="flex justify-center mt-6">
+                      <button
+                        onClick={() => loadFeed(false, feedPageToken)}
+                        className="px-6 py-2.5 border border-white/10 hover:bg-white/5 rounded-full text-sm font-semibold transition cursor-pointer active:scale-95"
+                      >
+                        Show More Videos
+                      </button>
                     </div>
-                  ))}
-                </div>
+                  )}
+
+                  {/* Loader Grid */}
+                  {feedLoading && (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-x-4 gap-y-8 animate-pulse mt-4">
+                      {[...Array(8)].map((_, i) => (
+                        <div key={i} className="flex flex-col gap-3">
+                          <div className="aspect-video bg-white/5 rounded-xl" />
+                          <div className="flex gap-3">
+                            <div className="w-9 h-9 rounded-full bg-white/5 shrink-0" />
+                            <div className="flex-1 flex flex-col gap-2">
+                              <div className="h-4 bg-white/5 rounded w-11/12" />
+                              <div className="h-3 bg-white/5 rounded w-3/4" />
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </>
               )}
             </div>
           )}

@@ -877,6 +877,66 @@ app.get('/api/v5/cache/size', (req, res) => {
   }
 });
 
+// GET list of all cached videos on server disk with metadata
+app.get('/api/v5/cache/list', (req, res) => {
+  if (!fs.existsSync(cacheSubdir)) {
+    return res.json([]);
+  }
+
+  try {
+    const folders = fs.readdirSync(cacheSubdir);
+    const list = [];
+    folders.forEach(videoId => {
+      const videoDir = path.join(cacheSubdir, videoId);
+      if (fs.statSync(videoDir).isDirectory()) {
+        const files = fs.readdirSync(videoDir);
+        const cacheFiles = files.filter(f => f.startsWith('cache_'));
+        if (cacheFiles.length > 0) {
+          let meta = {};
+          const metaPath = path.join(videoDir, 'metadata.json');
+          if (fs.existsSync(metaPath)) {
+            try {
+              meta = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
+            } catch (e) {}
+          }
+          
+          list.push({
+            videoId,
+            title: meta.title || `Cached Video (${videoId})`,
+            duration: meta.duration || 0,
+            channelTitle: meta.channelTitle || 'Unknown',
+            channelId: meta.channelId || '',
+            cachedFormats: cacheFiles.map(f => {
+              const parts = f.replace('cache_', '').split('.');
+              return {
+                quality: parseInt(parts[0]),
+                ext: parts[1]
+              };
+            })
+          });
+        }
+      }
+    });
+    res.json(list);
+  } catch (err) {
+    console.error('Failed to list cached videos:', err);
+    res.status(500).json({ error: 'Failed to list cached videos' });
+  }
+});
+
+// GET check if backend is online to public internet (YouTube)
+app.get('/api/v5/status/network', async (req, res) => {
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 2000);
+    const response = await fetch('https://www.youtube.com', { method: 'HEAD', signal: controller.signal });
+    clearTimeout(timeoutId);
+    res.json({ online: response.ok });
+  } catch (e) {
+    res.json({ online: false });
+  }
+});
+
 // DELETE all files from backend cache directory
 app.delete('/api/v5/cache', (req, res) => {
   try {
@@ -906,8 +966,20 @@ app.get('/api/v5/info/:videoId', async (req, res) => {
       preferFreeFormats: true,
     });
 
+    // Write metadata to server disk in unified cache directory
+    const videoDir = getVideoDir(videoId);
+    const metaPath = path.join(videoDir, 'metadata.json');
+    const metadata = {
+      videoId,
+      title: output.title,
+      duration: parseInt(output.duration) || 0,
+      channelTitle: output.uploader || output.channel || 'Unknown',
+      channelId: output.channel_id || ''
+    };
+    fs.writeFileSync(metaPath, JSON.stringify(metadata, null, 2));
+
     // Fetch info and cache the thumbnail on server disk in the background
-    const thumbnailPath = path.join(DOWNLOADS_DIR, `thumbnail_${videoId}.jpg`);
+    const thumbnailPath = path.join(videoDir, 'thumbnail.jpg');
     if (!fs.existsSync(thumbnailPath)) {
       fetch(`https://img.youtube.com/vi/${videoId}/hqdefault.jpg`)
         .then(async (response) => {
@@ -947,12 +1019,12 @@ app.get('/api/v5/info/:videoId', async (req, res) => {
 
     const audioFormatsMapped = audioFormats.map(f => ({
       ...f,
-      isCached: fs.existsSync(path.join(DOWNLOADS_DIR, videoId, `cache_${f.quality}.${f.ext}`)) && !cacheJobs[`${videoId}_${f.quality}_${f.ext}`]
+      isCached: fs.existsSync(path.join(getVideoDir(videoId), `cache_${f.quality}.${f.ext}`)) && !cacheJobs[`${videoId}_${f.quality}_${f.ext}`]
     }));
 
     const videoFormatsMapped = videoFormats.map(f => ({
       ...f,
-      isCached: fs.existsSync(path.join(DOWNLOADS_DIR, videoId, `cache_${f.quality}.${f.ext}`)) && !cacheJobs[`${videoId}_${f.quality}_${f.ext}`]
+      isCached: fs.existsSync(path.join(getVideoDir(videoId), `cache_${f.quality}.${f.ext}`)) && !cacheJobs[`${videoId}_${f.quality}_${f.ext}`]
     }));
 
     const isCachedOnServer = audioFormatsMapped.some(f => f.isCached) || videoFormatsMapped.some(f => f.isCached);
@@ -972,11 +1044,17 @@ app.get('/api/v5/info/:videoId', async (req, res) => {
 
     // OFFLINE FALLBACK: Check if cached file exists
     let cachedFiles = [];
-    const videoDir = path.join(DOWNLOADS_DIR, videoId);
+    const videoDir = getVideoDir(videoId);
+    let cachedMetadata = null;
     try {
       if (fs.existsSync(videoDir)) {
         const files = fs.readdirSync(videoDir);
         cachedFiles = files.filter(f => f.startsWith('cache_'));
+
+        const metaPath = path.join(videoDir, 'metadata.json');
+        if (fs.existsSync(metaPath)) {
+          cachedMetadata = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
+        }
       }
     } catch (e) {}
 
@@ -1010,8 +1088,10 @@ app.get('/api/v5/info/:videoId', async (req, res) => {
 
       return res.json({
         videoId,
-        title: `Cached Video (${videoId})`,
-        duration: 0,
+        title: cachedMetadata?.title || `Cached Video (${videoId})`,
+        duration: cachedMetadata?.duration || 0,
+        channelTitle: cachedMetadata?.channelTitle || 'Unknown',
+        channelId: cachedMetadata?.channelId || '',
         isCached: true,
         formats: {
           audio: audioFormats,
