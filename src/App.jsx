@@ -1759,11 +1759,11 @@ export default function App() {
                     {activePlayItem?.ext === 'mp3' && (
                       <div className="absolute inset-0 bg-[#06080c] flex flex-col items-center justify-center pointer-events-none select-none z-10">
                         {/* Glowing Background Radial Blur */}
-                        <div className="absolute w-[200px] h-[200px] sm:w-[260px] sm:h-[260px] rounded-full bg-rose-500/10 blur-[80px] -z-10 pointer-events-none" />
+                        <div className="absolute w-[320px] h-[320px] sm:w-[420px] sm:h-[420px] rounded-full bg-rose-500/10 blur-[90px] -z-10 pointer-events-none" />
                         
                         {/* Vinyl Disc Container */}
                         <div 
-                          className="relative w-44 h-44 sm:w-56 sm:h-56 rounded-full bg-zinc-950 border-[6px] border-zinc-800/80 shadow-2xl flex items-center justify-center animate-spin"
+                          className="relative w-[220px] h-[220px] sm:w-[280px] sm:h-[280px] md:w-[320px] md:h-[320px] rounded-full bg-zinc-950 border-[6px] border-zinc-800/80 shadow-2xl flex items-center justify-center animate-spin"
                           style={{ 
                             animationPlayState: videoIsPlaying ? 'running' : 'paused',
                             animationDuration: '10s'
@@ -1774,7 +1774,7 @@ export default function App() {
                           <div className="absolute inset-5 rounded-full border border-white/5 bg-[radial-gradient(circle_at_center,_transparent_30%,_rgba(255,255,255,0.03)_32%,_transparent_33%,_rgba(255,255,255,0.02)_52%,_transparent_53%,_rgba(255,255,255,0.01)_75%)]" />
                           
                           {/* Center Thumbnail Label */}
-                          <div className="w-16 h-16 sm:w-20 sm:h-20 rounded-full overflow-hidden border-4 border-black bg-slate-900 flex items-center justify-center relative shadow-inner">
+                          <div className="w-20 h-20 sm:w-24 sm:h-24 md:w-28 md:h-28 rounded-full overflow-hidden border-4 border-black bg-slate-900 flex items-center justify-center relative shadow-inner">
                             {activePlayItem?.isOffline ? (
                               <OfflineThumbnail 
                                 storageId={activePlayItem.id} 
@@ -1794,7 +1794,7 @@ export default function App() {
                             )}
                             
                             {/* Spindle Hole */}
-                            <div className="absolute w-3 h-3 rounded-full bg-[#0a0d14] border border-white/20 shadow-inner" />
+                            <div className="absolute w-4 h-4 rounded-full bg-[#0a0d14] border border-white/20 shadow-inner" />
                           </div>
                         </div>
 
