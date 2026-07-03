@@ -1763,7 +1763,7 @@ export default function App() {
                         
                         {/* Thumbnail Disc Container */}
                         <div 
-                          className="relative w-[220px] h-[220px] sm:w-[280px] sm:h-[280px] md:w-[320px] md:h-[320px] rounded-full overflow-hidden border-[8px] border-zinc-800/80 shadow-2xl flex items-center justify-center animate-spin"
+                          className="relative w-[240px] h-[240px] sm:w-[300px] sm:h-[300px] md:w-[340px] md:h-[340px] rounded-full overflow-hidden border border-white/10 shadow-2xl flex items-center justify-center animate-spin bg-zinc-950"
                           style={{ 
                             animationPlayState: videoIsPlaying ? 'running' : 'paused',
                             animationDuration: '12s'
@@ -1789,11 +1789,11 @@ export default function App() {
                           )}
                           
                           {/* Radial overlay to simulate shiny CD surface reflection */}
-                          <div className="absolute inset-0 bg-[linear-gradient(135deg,_rgba(255,255,255,0.15)_0%,_transparent_50%,_rgba(0,0,0,0.4)_100%)] pointer-events-none" />
-                          <div className="absolute inset-0 bg-[radial-gradient(circle_at_center,_transparent_60%,_rgba(0,0,0,0.6)_100%)] pointer-events-none" />
+                          <div className="absolute inset-0 bg-[linear-gradient(135deg,_rgba(255,255,255,0.15)_0%,_transparent_50%,_rgba(0,0,0,0.4)_100%)] pointer-events-none rounded-full" />
+                          <div className="absolute inset-0 bg-[radial-gradient(circle_at_center,_transparent_60%,_rgba(0,0,0,0.6)_100%)] pointer-events-none rounded-full" />
                           
                           {/* Spindle Hole in the absolute center */}
-                          <div className="absolute w-5 h-5 rounded-full bg-[#0a0d14] border border-white/20 shadow-[inset_0_2px_4px_rgba(0,0,0,0.6)]" />
+                          <div className="absolute w-6 h-6 rounded-full bg-[#0a0d14] border border-white/20 shadow-[inset_0_2px_4px_rgba(0,0,0,0.6)] animate-none" />
                         </div>
 
                         {/* Title & Artist below Disc */}
