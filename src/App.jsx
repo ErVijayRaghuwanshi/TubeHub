@@ -1761,41 +1761,39 @@ export default function App() {
                         {/* Glowing Background Radial Blur */}
                         <div className="absolute w-[320px] h-[320px] sm:w-[420px] sm:h-[420px] rounded-full bg-rose-500/10 blur-[90px] -z-10 pointer-events-none" />
                         
-                        {/* Vinyl Disc Container */}
+                        {/* Thumbnail Disc Container */}
                         <div 
-                          className="relative w-[220px] h-[220px] sm:w-[280px] sm:h-[280px] md:w-[320px] md:h-[320px] rounded-full bg-zinc-950 border-[6px] border-zinc-800/80 shadow-2xl flex items-center justify-center animate-spin"
+                          className="relative w-[220px] h-[220px] sm:w-[280px] sm:h-[280px] md:w-[320px] md:h-[320px] rounded-full overflow-hidden border-[8px] border-zinc-800/80 shadow-2xl flex items-center justify-center animate-spin"
                           style={{ 
                             animationPlayState: videoIsPlaying ? 'running' : 'paused',
-                            animationDuration: '10s'
+                            animationDuration: '12s'
                           }}
                         >
-                          {/* Grooves */}
-                          <div className="absolute inset-2 rounded-full border border-black/50 bg-[radial-gradient(circle_at_center,_transparent_45%,_rgba(0,0,0,0.85)_46%,_transparent_47%,_rgba(0,0,0,0.85)_58%,_transparent_59%,_rgba(0,0,0,0.85)_72%,_transparent_73%,_rgba(0,0,0,0.9)_88%)]" />
-                          <div className="absolute inset-5 rounded-full border border-white/5 bg-[radial-gradient(circle_at_center,_transparent_30%,_rgba(255,255,255,0.03)_32%,_transparent_33%,_rgba(255,255,255,0.02)_52%,_transparent_53%,_rgba(255,255,255,0.01)_75%)]" />
+                          {/* Full cover Thumbnail */}
+                          {activePlayItem?.isOffline ? (
+                            <OfflineThumbnail 
+                              storageId={activePlayItem.id} 
+                              fallbackId={activePlayItem.id}
+                              className="w-full h-full object-cover" 
+                            />
+                          ) : (
+                            <img 
+                              src={`/api/v5/thumbnail/${route.videoId}`} 
+                              alt="" 
+                              className="w-full h-full object-cover"
+                              onError={(e) => {
+                                e.target.src = '/favicon.svg';
+                                e.target.className = 'w-16 h-16 opacity-45';
+                              }}
+                            />
+                          )}
                           
-                          {/* Center Thumbnail Label */}
-                          <div className="w-20 h-20 sm:w-24 sm:h-24 md:w-28 md:h-28 rounded-full overflow-hidden border-4 border-black bg-slate-900 flex items-center justify-center relative shadow-inner">
-                            {activePlayItem?.isOffline ? (
-                              <OfflineThumbnail 
-                                storageId={activePlayItem.id} 
-                                fallbackId={activePlayItem.id}
-                                className="w-full h-full object-cover" 
-                              />
-                            ) : (
-                              <img 
-                                src={`/api/v5/thumbnail/${route.videoId}`} 
-                                alt="" 
-                                className="w-full h-full object-cover"
-                                onError={(e) => {
-                                  e.target.src = '/favicon.svg';
-                                  e.target.className = 'w-8 h-8 opacity-45';
-                                }}
-                              />
-                            )}
-                            
-                            {/* Spindle Hole */}
-                            <div className="absolute w-4 h-4 rounded-full bg-[#0a0d14] border border-white/20 shadow-inner" />
-                          </div>
+                          {/* Radial overlay to simulate shiny CD surface reflection */}
+                          <div className="absolute inset-0 bg-[linear-gradient(135deg,_rgba(255,255,255,0.15)_0%,_transparent_50%,_rgba(0,0,0,0.4)_100%)] pointer-events-none" />
+                          <div className="absolute inset-0 bg-[radial-gradient(circle_at_center,_transparent_60%,_rgba(0,0,0,0.6)_100%)] pointer-events-none" />
+                          
+                          {/* Spindle Hole in the absolute center */}
+                          <div className="absolute w-5 h-5 rounded-full bg-[#0a0d14] border border-white/20 shadow-[inset_0_2px_4px_rgba(0,0,0,0.6)]" />
                         </div>
 
                         {/* Title & Artist below Disc */}
