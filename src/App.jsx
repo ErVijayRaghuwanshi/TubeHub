@@ -1755,6 +1755,61 @@ export default function App() {
                       className="w-full h-full object-contain cursor-pointer"
                     />
 
+                    {/* Vinyl Record Player Overlay for Audio formats */}
+                    {activePlayItem?.ext === 'mp3' && (
+                      <div className="absolute inset-0 bg-[#06080c] flex flex-col items-center justify-center pointer-events-none select-none z-10">
+                        {/* Glowing Background Radial Blur */}
+                        <div className="absolute w-[200px] h-[200px] sm:w-[260px] sm:h-[260px] rounded-full bg-rose-500/10 blur-[80px] -z-10 pointer-events-none" />
+                        
+                        {/* Vinyl Disc Container */}
+                        <div 
+                          className="relative w-44 h-44 sm:w-56 sm:h-56 rounded-full bg-zinc-950 border-[6px] border-zinc-800/80 shadow-2xl flex items-center justify-center animate-spin"
+                          style={{ 
+                            animationPlayState: videoIsPlaying ? 'running' : 'paused',
+                            animationDuration: '10s'
+                          }}
+                        >
+                          {/* Grooves */}
+                          <div className="absolute inset-2 rounded-full border border-black/50 bg-[radial-gradient(circle_at_center,_transparent_45%,_rgba(0,0,0,0.85)_46%,_transparent_47%,_rgba(0,0,0,0.85)_58%,_transparent_59%,_rgba(0,0,0,0.85)_72%,_transparent_73%,_rgba(0,0,0,0.9)_88%)]" />
+                          <div className="absolute inset-5 rounded-full border border-white/5 bg-[radial-gradient(circle_at_center,_transparent_30%,_rgba(255,255,255,0.03)_32%,_transparent_33%,_rgba(255,255,255,0.02)_52%,_transparent_53%,_rgba(255,255,255,0.01)_75%)]" />
+                          
+                          {/* Center Thumbnail Label */}
+                          <div className="w-16 h-16 sm:w-20 sm:h-20 rounded-full overflow-hidden border-4 border-black bg-slate-900 flex items-center justify-center relative shadow-inner">
+                            {activePlayItem?.isOffline ? (
+                              <OfflineThumbnail 
+                                storageId={activePlayItem.id} 
+                                fallbackId={activePlayItem.id}
+                                className="w-full h-full object-cover" 
+                              />
+                            ) : (
+                              <img 
+                                src={`/api/v5/thumbnail/${route.videoId}`} 
+                                alt="" 
+                                className="w-full h-full object-cover"
+                                onError={(e) => {
+                                  e.target.src = '/favicon.svg';
+                                  e.target.className = 'w-8 h-8 opacity-45';
+                                }}
+                              />
+                            )}
+                            
+                            {/* Spindle Hole */}
+                            <div className="absolute w-3 h-3 rounded-full bg-[#0a0d14] border border-white/20 shadow-inner" />
+                          </div>
+                        </div>
+
+                        {/* Title & Artist below Disc */}
+                        <div className="mt-4 px-4 text-center select-none max-w-sm">
+                          <h4 className="text-xs sm:text-sm font-semibold text-white/95 line-clamp-1">
+                            {activePlayItem?.title || 'Audio Stream'}
+                          </h4>
+                          <span className="text-[10px] text-slate-400 mt-1 block uppercase tracking-widest font-mono">
+                            {videoIsPlaying ? 'Playing Audio' : 'Paused'}
+                          </span>
+                        </div>
+                      </div>
+                    )}
+
                     {/* Media Source Overlay HUD Badge */}
                     <div 
                       className={`absolute top-4 right-4 z-20 px-2.5 py-1 rounded-md text-[9px] font-bold tracking-wider border shadow-md backdrop-blur-md transition-opacity duration-300 pointer-events-none select-none ${
