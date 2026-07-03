@@ -879,6 +879,10 @@ app.get('/api/v5/cache/size', (req, res) => {
 
 // GET list of all cached videos on server disk with metadata
 app.get('/api/v5/cache/list', (req, res) => {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
+
   if (!fs.existsSync(cacheSubdir)) {
     return res.json([]);
   }
@@ -926,6 +930,10 @@ app.get('/api/v5/cache/list', (req, res) => {
 
 // GET check if backend is online to public internet (YouTube)
 app.get('/api/v5/status/network', async (req, res) => {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
+
   try {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 2000);

@@ -161,11 +161,11 @@ export default function App() {
     
     const checkServerConnectivity = async () => {
       try {
-        const res = await fetch('/api/v5/status/network');
+        const res = await fetch(`/api/v5/status/network?t=${Date.now()}`);
         const data = await res.json();
         setIsServerOnline(data.online);
         if (!data.online) {
-          const listRes = await fetch('/api/v5/cache/list');
+          const listRes = await fetch(`/api/v5/cache/list?t=${Date.now()}`);
           const listData = await listRes.json();
           setServerCachedVideos(listData);
         }
