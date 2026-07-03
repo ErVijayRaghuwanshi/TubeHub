@@ -9,6 +9,23 @@ import {
   Download, ChevronDown, ChevronUp, Menu, Library, Database, ChevronLeft
 } from 'lucide-react';
 
+// Helper to extract YouTube video ID from shared URL text
+function extractYoutubeVideoId(text) {
+  if (!text) return null;
+  const regexes = [
+    /youtu\.be\/([a-zA-Z0-9_-]{11})/,
+    /youtube\.com\/watch\?v=([a-zA-Z0-9_-]{11})/,
+    /youtube\.com\/embed\/([a-zA-Z0-9_-]{11})/,
+    /youtube\.com\/shorts\/([a-zA-Z0-9_-]{11})/,
+    /youtube\.com\/v\/([a-zA-Z0-9_-]{11})/
+  ];
+  for (const regex of regexes) {
+    const match = text.match(regex);
+    if (match) return match[1];
+  }
+  return null;
+}
+
 // Sub-component to render offline thumbnails loaded from IndexedDB
 function OfflineThumbnail({ storageId, fallbackId, className }) {
   const [src, setSrc] = useState(null);
@@ -89,7 +106,7 @@ export default function App() {
 
   const [searchQuery, setSearchQuery] = useState(route.query || '');
 
-  const navigate = (pageName, params = {}) => {
+  const navigate = useCallback((pageName, params = {}) => {
     let path = '/';
     let search = '';
     if (pageName === 'watch' && params.v) {
@@ -115,7 +132,7 @@ export default function App() {
       routeParams.query = params.q || '';
     }
     setRoute({ name: pageName, ...routeParams });
-  };
+  }, []);
 
   useEffect(() => {
     const handlePopState = () => {
@@ -179,6 +196,28 @@ export default function App() {
     const interval = setInterval(checkServerConnectivity, 15000);
     return () => clearInterval(interval);
   }, [isOnline]);
+
+  useEffect(() => {
+    // Check if app was launched via PWA Web Share Target
+    const searchParams = new URLSearchParams(window.location.search);
+    const sharedText = searchParams.get('text') || '';
+    const sharedUrl = searchParams.get('url') || '';
+    const sharedTitle = searchParams.get('title') || '';
+    
+    const combinedText = `${sharedText} ${sharedUrl} ${sharedTitle}`;
+    const videoId = extractYoutubeVideoId(combinedText);
+    
+    if (videoId) {
+      console.log(`PWA Share Target detected video ID: ${videoId}`);
+      setTimeout(() => {
+        navigate('watch', { v: videoId });
+      }, 0);
+      
+      // Clean up query parameters from browser URL bar to avoid re-triggering on refresh
+      const cleanUrl = window.location.pathname + window.location.hash;
+      window.history.replaceState({}, document.title, cleanUrl);
+    }
+  }, [navigate]);
 
   // UI layout and search states
   const [sidebarOpen, setSidebarOpen] = useState(() => {
