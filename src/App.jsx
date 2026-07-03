@@ -1774,16 +1774,16 @@ export default function App() {
                             <OfflineThumbnail 
                               storageId={activePlayItem.id} 
                               fallbackId={activePlayItem.id}
-                              className="w-full h-full object-cover" 
+                              className="w-full h-full object-cover rounded-full" 
                             />
                           ) : (
                             <img 
                               src={`/api/v5/thumbnail/${route.videoId}`} 
                               alt="" 
-                              className="w-full h-full object-cover"
+                              className="w-full h-full object-cover rounded-full"
                               onError={(e) => {
                                 e.target.src = '/favicon.svg';
-                                e.target.className = 'w-16 h-16 opacity-45';
+                                e.target.className = 'w-16 h-16 opacity-45 rounded-full';
                               }}
                             />
                           )}
